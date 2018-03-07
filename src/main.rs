@@ -44,7 +44,7 @@ impl fmt::Display for Indentation {
 }
 
 fn main() {
-    let module = deserialize_file("wasm/livesplit_core.wasm").unwrap();
+    let module = deserialize_file("wasmBoy/dist/wasm/index.untouched.wasm").unwrap();
     let module = module.parse_names().unwrap_or_else(|(_, m)| m);
     // println!("{:#?}", module);
     // return;
@@ -299,15 +299,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
             use parity_wasm::elements::Opcode::*;
             match *opcode {
                 Unreachable => {
-                    println!("{}// unreachable", indentation);
                     println!("{}unreachable!();", indentation);
                 }
                 Nop => {
-                    println!("{}// nop", indentation);
                     assert!(stack.is_empty());
                 }
                 Block(block_type) => {
-                    println!("{}// block ({:?})", indentation, block_type);
                     let block_type = if let BlockType::Value(ty) = block_type {
                         println!("{}let var{}: {};", indentation, expr_index, to_rs_type(ty));
                         expr_index += 1;
@@ -321,7 +318,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     block_types.push((Some((loop_count - 1, false)), block_type));
                 }
                 Loop(block_type) => {
-                    println!("{}// loop ({:?})", indentation, block_type);
                     let block_type = if let BlockType::Value(ty) = block_type {
                         println!("{}let var{}: {};", indentation, expr_index, to_rs_type(ty));
                         expr_index += 1;
@@ -335,9 +331,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     block_types.push((Some((loop_count - 1, true)), block_type));
                 }
                 If(block_type) => {
-                    // TODO Handle Result
                     let expr = stack.pop().unwrap();
-                    println!("{}// if ({:?})", indentation, block_type);
                     let block_type = if let BlockType::Value(ty) = block_type {
                         println!("{}let var{}: {};", indentation, expr_index, to_rs_type(ty));
                         expr_index += 1;
@@ -356,7 +350,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         println!("{}var{} = var{};", indentation, target_var, expr);
                     }
                     indentation.0 -= 1;
-                    println!("{}}} else {{ // else", indentation);
+                    println!("{}}} else {{", indentation);
                     indentation.0 += 1;
                 }
                 End => {
@@ -395,7 +389,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         assert!(stack.is_empty());
                     }
                     indentation.0 -= 1;
-                    println!("{}}} // end", indentation);
+                    println!("{}}}", indentation);
                 }
                 Br(relative_depth) => {
                     let &(loop_info, _) = block_types
@@ -405,10 +399,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         .unwrap();
                     let (label, is_a_loop) = loop_info.unwrap();
 
-                    println!(
-                        "{}// br (depth={}) $label{}",
-                        indentation, relative_depth, label
-                    );
                     println!(
                         "{}{} 'label{};",
                         indentation,
@@ -425,10 +415,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         .unwrap();
                     let (label, is_a_loop) = loop_info.unwrap();
 
-                    println!(
-                        "{}// br_if (depth={}) $label{}",
-                        indentation, relative_depth, label
-                    );
                     println!("{}if var{} != 0 {{", indentation, expr);
                     println!(
                         "{}    {} 'label{};",
@@ -440,10 +426,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 BrTable(ref table, default_depth) => {
                     let expr = stack.pop().unwrap();
-                    println!(
-                        "{}// br_table {:?} default={}",
-                        indentation, table, default_depth
-                    );
                     println!("{}match var{} {{", indentation, expr);
                     indentation.0 += 1;
                     for (index, &relative_depth) in table.iter().enumerate() {
@@ -477,8 +459,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     println!("{}}}", indentation);
                 }
                 Return => {
-                    // TODO Handle returning 0 values
-                    println!("{}// return", indentation);
                     if let Some(expr) = stack.pop() {
                         println!("{}return var{};", indentation, expr);
                     } else {
@@ -486,7 +466,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     }
                 }
                 Call(fn_index) => {
-                    println!("{}// call ${}", indentation, fn_index);
                     let (ref name, fn_type, _) = functions[fn_index as usize];
                     print!("{}", indentation);
                     if fn_type.return_type().is_some() {
@@ -512,7 +491,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     }
                 }
                 CallIndirect(type_index, _) => {
-                    println!("{}// call_indirect $t{}", indentation, type_index);
                     let Type::Function(ref fn_type) = types.types()[type_index as usize];
                     print!("{}", indentation);
                     if fn_type.return_type().is_some() {
@@ -531,14 +509,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     }
                 }
                 Drop => {
-                    println!("{}// drop", indentation);
                     stack.pop().unwrap();
                 }
                 Select => {
                     let c = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
                     let a = stack.pop().unwrap();
-                    println!("{}// select", indentation);
                     println!(
                         "{}let var{} = if var{} != 0 {{ var{} }} else {{ var{} }};",
                         indentation, expr_index, c, a, b
@@ -547,26 +523,22 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     expr_index += 1;
                 }
                 GetLocal(i) => {
-                    println!("{}// get_local $var{}", indentation, i);
                     println!("{}let var{} = var{};", indentation, expr_index, i);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 SetLocal(i) => {
                     let val = stack.pop().unwrap();
-                    println!("{}// set_local $var{}", indentation, i);
                     println!("{}var{} = var{};", indentation, i, val);
                 }
                 TeeLocal(i) => {
                     let val = *stack.last().unwrap();
-                    println!("{}// tee_local $var{}", indentation, i);
                     println!("{}var{} = var{};", indentation, i, val);
                 }
                 GetGlobal(i) => {
                     let global = &globals[i as usize];
                     let name = &global.name;
                     let prefix = if global.is_mutable { "self." } else { "Self::" };
-                    println!("{}// get_global ${}", indentation, name);
                     println!("{}let var{} = {}{};", indentation, expr_index, prefix, name);
                     stack.push(expr_index);
                     expr_index += 1;
@@ -576,17 +548,10 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     let global = &globals[i as usize];
                     let name = &global.name;
                     assert!(global.is_mutable);
-                    println!("{}// set_global ${}", indentation, name);
                     println!("{}self.{} = var{};", indentation, name, val);
                 }
-                I32Load(log_align, offset) => {
+                I32Load(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.load offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load32(var{} as usize + {}) as i32;",
                         indentation, expr_index, addr, offset
@@ -594,14 +559,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I64Load(log_align, offset) => {
+                I64Load(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.load offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load64(var{} as usize + {}) as i64;",
                         indentation, expr_index, addr, offset
@@ -609,14 +568,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                F32Load(log_align, offset) => {
+                F32Load(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// f32.load offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = f32::from_bits(self.mem.load32(var{} as usize + {}) as u32);",
                         indentation, expr_index, addr, offset
@@ -624,14 +577,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                F64Load(log_align, offset) => {
+                F64Load(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// f64.load offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = f64::from_bits(self.mem.load64(var{} as usize + {}) as u64);",
                         indentation, expr_index, addr, offset
@@ -639,14 +586,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I32Load8S(log_align, offset) => {
+                I32Load8S(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.load8_s offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load8(var{} as usize + {}) as i8 as i32;",
                         indentation, expr_index, addr, offset
@@ -654,14 +595,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I32Load8U(log_align, offset) => {
+                I32Load8U(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.load8_u offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load8(var{} as usize + {}) as i32;",
                         indentation, expr_index, addr, offset
@@ -669,14 +604,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I32Load16S(log_align, offset) => {
+                I32Load16S(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.load16_s offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load16(var{} as usize + {}) as i16 as i32;",
                         indentation, expr_index, addr, offset
@@ -684,14 +613,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I32Load16U(log_align, offset) => {
+                I32Load16U(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.load16_u offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load16(var{} as usize + {}) as i32;",
                         indentation, expr_index, addr, offset
@@ -699,14 +622,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I64Load8S(log_align, offset) => {
+                I64Load8S(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.load8_s offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load8(var{} as usize + {}) as i8 as i64;",
                         indentation, expr_index, addr, offset
@@ -714,14 +631,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I64Load8U(log_align, offset) => {
+                I64Load8U(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.load8_u offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load8(var{} as usize + {}) as i64;",
                         indentation, expr_index, addr, offset
@@ -729,14 +640,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I64Load16S(log_align, offset) => {
+                I64Load16S(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.load16_s offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load16(var{} as usize + {}) as i16 as i64;",
                         indentation, expr_index, addr, offset
@@ -744,14 +649,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I64Load16U(log_align, offset) => {
+                I64Load16U(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.load16_u offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load16(var{} as usize + {}) as i64;",
                         indentation, expr_index, addr, offset
@@ -759,14 +658,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I64Load32S(log_align, offset) => {
+                I64Load32S(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.load32_s offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load32(var{} as usize + {}) as i32 as i64;",
                         indentation, expr_index, addr, offset
@@ -774,14 +667,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I64Load32U(log_align, offset) => {
+                I64Load32U(_log_align, offset) => {
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.load32_u offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}let var{} = self.mem.load32(var{} as usize + {}) as i64;",
                         indentation, expr_index, addr, offset
@@ -789,141 +676,85 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     stack.push(expr_index);
                     expr_index += 1;
                 }
-                I32Store(log_align, offset) => {
+                I32Store(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.store offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store32(var{} as usize + {}, var{} as u32);",
                         indentation, addr, offset, value
                     );
                 }
-                I64Store(log_align, offset) => {
+                I64Store(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.store offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store64(var{} as usize + {}, var{} as u64);",
                         indentation, addr, offset, value
                     );
                 }
-                F32Store(log_align, offset) => {
+                F32Store(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// f32.store offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store32(var{} as usize + {}, var{}.to_bits());",
                         indentation, addr, offset, value
                     );
                 }
-                F64Store(log_align, offset) => {
+                F64Store(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// f64.store offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store64(var{} as usize + {}, var{}.to_bits());",
                         indentation, addr, offset, value
                     );
                 }
-                I32Store8(log_align, offset) => {
+                I32Store8(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.store8 offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store8(var{} as usize + {}, var{} as u8);",
                         indentation, addr, offset, value
                     );
                 }
-                I32Store16(log_align, offset) => {
+                I32Store16(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i32.store16 offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store16(var{} as usize + {}, var{} as u16);",
                         indentation, addr, offset, value
                     );
                 }
-                I64Store8(log_align, offset) => {
+                I64Store8(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.store8 offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store8(var{} as usize + {}, var{} as u8);",
                         indentation, addr, offset, value
                     );
                 }
-                I64Store16(log_align, offset) => {
+                I64Store16(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.store16 offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store16(var{} as usize + {}, var{} as u16);",
                         indentation, addr, offset, value
                     );
                 }
-                I64Store32(log_align, offset) => {
+                I64Store32(_log_align, offset) => {
                     let value = stack.pop().unwrap();
                     let addr = stack.pop().unwrap();
-                    println!(
-                        "{}// i64.store32 offset={} align={}",
-                        indentation,
-                        offset,
-                        1 << log_align
-                    );
                     println!(
                         "{}self.mem.store32(var{} as usize + {}, var{} as u32);",
                         indentation, addr, offset, value
                     );
                 }
                 CurrentMemory(_) => {
-                    println!("{}// mem.size", indentation);
                     println!("{}let var{} = self.mem.size();", indentation, expr_index);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 GrowMemory(_) => {
                     let pages = stack.pop().unwrap();
-                    println!("{}// mem.grow", indentation);
                     println!(
                         "{}let var{} = self.mem.grow(var{} as usize);",
                         indentation, expr_index, pages
@@ -932,19 +763,16 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     expr_index += 1;
                 }
                 I32Const(c) => {
-                    println!("{}// i32.const {}", indentation, c);
                     println!("{}let var{} = {}i32;", indentation, expr_index, c);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I64Const(c) => {
-                    println!("{}// i64.const {}", indentation, c);
                     println!("{}let var{} = {}i64;", indentation, expr_index, c);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F32Const(c) => {
-                    println!("{}// f32.const {}", indentation, c);
                     println!(
                         "{}let var{} = f32::from_bits({}u32);",
                         indentation, expr_index, c as u32
@@ -953,7 +781,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     expr_index += 1;
                 }
                 F64Const(c) => {
-                    println!("{}// f64.const {}", indentation, c);
                     println!(
                         "{}let var{} = f64::from_bits({}u64);",
                         indentation, expr_index, c as u64
@@ -963,7 +790,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I32Eqz => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i32.eqz", indentation);
                     println!(
                         "{}let var{} = (var{} == 0) as i32;",
                         indentation, expr_index, a
@@ -974,7 +800,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Eq => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.eq", indentation);
                     println!(
                         "{}let var{} = (var{} == var{}) as i32;",
                         indentation, expr_index, b, a
@@ -985,7 +810,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Ne => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.ne", indentation);
                     println!(
                         "{}let var{} = (var{} != var{}) as i32;",
                         indentation, expr_index, b, a
@@ -996,7 +820,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32LtS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.lt_s", indentation);
                     println!(
                         "{}let var{} = (var{} < var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1007,7 +830,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32LtU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.lt_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u32) < (var{} as u32)) as i32;",
                         indentation, expr_index, b, a
@@ -1018,7 +840,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32GtS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.gt_s", indentation);
                     println!(
                         "{}let var{} = (var{} > var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1029,7 +850,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32GtU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.gt_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u32) > (var{} as u32)) as i32;",
                         indentation, expr_index, b, a
@@ -1040,7 +860,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32LeS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.le_s", indentation);
                     println!(
                         "{}let var{} = (var{} <= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1051,7 +870,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32LeU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.le_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u32) <= (var{} as u32)) as i32;",
                         indentation, expr_index, b, a
@@ -1062,7 +880,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32GeS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.ge_s", indentation);
                     println!(
                         "{}let var{} = (var{} >= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1073,7 +890,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32GeU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.ge_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u32) >= (var{} as u32)) as i32;",
                         indentation, expr_index, b, a
@@ -1083,7 +899,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64Eqz => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i64.eqz", indentation);
                     println!(
                         "{}let var{} = (var{} == 0) as i32;",
                         indentation, expr_index, a
@@ -1094,7 +909,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Eq => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.eq", indentation);
                     println!(
                         "{}let var{} = (var{} == var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1105,7 +919,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Ne => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.ne", indentation);
                     println!(
                         "{}let var{} = (var{} != var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1116,7 +929,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64LtS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.lt_s", indentation);
                     println!(
                         "{}let var{} = (var{} < var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1127,7 +939,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64LtU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.lt_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u64) < (var{} as u64)) as i32;",
                         indentation, expr_index, b, a
@@ -1138,7 +949,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64GtS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.gt_s", indentation);
                     println!(
                         "{}let var{} = (var{} > var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1149,7 +959,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64GtU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.gt_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u64) > (var{} as u64)) as i32;",
                         indentation, expr_index, b, a
@@ -1160,7 +969,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64LeS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.le_s", indentation);
                     println!(
                         "{}let var{} = (var{} <= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1171,7 +979,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64LeU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.le_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u64) <= (var{} as u64)) as i32;",
                         indentation, expr_index, b, a
@@ -1182,7 +989,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64GeS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.ge_s", indentation);
                     println!(
                         "{}let var{} = (var{} >= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1193,7 +999,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64GeU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.ge_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u64) >= (var{} as u64)) as i32;",
                         indentation, expr_index, b, a
@@ -1204,7 +1009,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Eq => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.eq", indentation);
                     println!(
                         "{}let var{} = (var{} == var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1215,7 +1019,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Ne => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.ne", indentation);
                     println!(
                         "{}let var{} = (var{} != var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1226,7 +1029,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Lt => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.lt", indentation);
                     println!(
                         "{}let var{} = (var{} < var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1237,7 +1039,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Gt => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.gt", indentation);
                     println!(
                         "{}let var{} = (var{} > var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1248,7 +1049,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Le => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.le", indentation);
                     println!(
                         "{}let var{} = (var{} <= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1259,7 +1059,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Ge => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.ge", indentation);
                     println!(
                         "{}let var{} = (var{} >= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1270,7 +1069,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Eq => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.eq", indentation);
                     println!(
                         "{}let var{} = (var{} == var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1281,7 +1079,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Ne => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.ne", indentation);
                     println!(
                         "{}let var{} = (var{} != var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1292,7 +1089,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Lt => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.lt", indentation);
                     println!(
                         "{}let var{} = (var{} < var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1303,7 +1099,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Gt => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.gt", indentation);
                     println!(
                         "{}let var{} = (var{} > var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1314,7 +1109,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Le => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.le", indentation);
                     println!(
                         "{}let var{} = (var{} <= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1325,7 +1119,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Ge => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.ge", indentation);
                     println!(
                         "{}let var{} = (var{} >= var{}) as i32;",
                         indentation, expr_index, b, a
@@ -1335,7 +1128,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I32Clz => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i32.clz", indentation);
                     println!(
                         "{}let var{} = var{}.leading_zeros() as i32;",
                         indentation, expr_index, a
@@ -1345,7 +1137,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I32Ctz => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i32.ctz", indentation);
                     println!(
                         "{}let var{} = var{}.trailing_zeros() as i32;",
                         indentation, expr_index, a
@@ -1355,7 +1146,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I32Popcnt => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i32.popcnt", indentation);
                     println!(
                         "{}let var{} = var{}.count_ones() as i32;",
                         indentation, expr_index, a
@@ -1366,7 +1156,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Add => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.add", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_add(var{});",
                         indentation, expr_index, b, a
@@ -1377,7 +1166,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Sub => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.sub", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_sub(var{});",
                         indentation, expr_index, b, a
@@ -1388,7 +1176,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Mul => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.mul", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_mul(var{});",
                         indentation, expr_index, b, a
@@ -1399,7 +1186,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32DivS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.div_s", indentation);
                     println!(
                         "{}let var{} = var{} / var{};",
                         indentation, expr_index, b, a
@@ -1410,7 +1196,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32DivU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.div_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u32) / (var{} as u32)) as i32;",
                         indentation, expr_index, b, a
@@ -1421,7 +1206,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32RemS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.rem_s", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_rem(var{});",
                         indentation, expr_index, b, a
@@ -1432,7 +1216,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32RemU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.rem_u", indentation);
                     println!(
                         "{}let var{} = (var{} as u32).wrapping_rem(var{} as u32) as i32;",
                         indentation, expr_index, b, a
@@ -1443,7 +1226,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32And => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.and", indentation);
                     println!(
                         "{}let var{} = var{} & var{};",
                         indentation, expr_index, b, a
@@ -1454,7 +1236,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Or => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.or", indentation);
                     println!(
                         "{}let var{} = var{} | var{};",
                         indentation, expr_index, b, a
@@ -1465,7 +1246,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Xor => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.xor", indentation);
                     println!(
                         "{}let var{} = var{} ^ var{};",
                         indentation, expr_index, b, a
@@ -1476,7 +1256,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Shl => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.shl", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_shl(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1487,7 +1266,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32ShrS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.shr_s", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_shr(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1498,7 +1276,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32ShrU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.shr_u", indentation);
                     println!(
                         "{}let var{} = (var{} as u32).wrapping_shr(var{} as u32) as i32;",
                         indentation, expr_index, b, a
@@ -1509,7 +1286,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Rotl => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.rotl", indentation);
                     println!(
                         "{}let var{} = var{}.rotate_left(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1520,7 +1296,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32Rotr => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i32.rotr", indentation);
                     println!(
                         "{}let var{} = var{}.rotate_right(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1530,7 +1305,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64Clz => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i64.clz", indentation);
                     println!(
                         "{}let var{} = var{}.leading_zeros() as i64;",
                         indentation, expr_index, a
@@ -1540,7 +1314,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64Ctz => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i64.ctz", indentation);
                     println!(
                         "{}let var{} = var{}.trailing_zeros() as i64;",
                         indentation, expr_index, a
@@ -1550,7 +1323,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64Popcnt => {
                     let a = stack.pop().unwrap();
-                    println!("{}// i64.popcnt", indentation);
                     println!(
                         "{}let var{} = var{}.count_ones() as i64;",
                         indentation, expr_index, a
@@ -1561,7 +1333,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Add => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.add", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_add(var{});",
                         indentation, expr_index, b, a
@@ -1572,7 +1343,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Sub => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.sub", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_sub(var{});",
                         indentation, expr_index, b, a
@@ -1583,7 +1353,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Mul => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.mul", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_mul(var{});",
                         indentation, expr_index, b, a
@@ -1594,7 +1363,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64DivS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.div_s", indentation);
                     println!(
                         "{}let var{} = var{} / var{};",
                         indentation, expr_index, b, a
@@ -1605,7 +1373,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64DivU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.div_u", indentation);
                     println!(
                         "{}let var{} = ((var{} as u64) / (var{} as u64)) as i64;",
                         indentation, expr_index, b, a
@@ -1616,7 +1383,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64RemS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.rem_s", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_rem(var{});",
                         indentation, expr_index, b, a
@@ -1627,7 +1393,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64RemU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.rem_u", indentation);
                     println!(
                         "{}let var{} = (var{} as u64).wrapping_rem(var{} as u64) as i64;",
                         indentation, expr_index, b, a
@@ -1638,7 +1403,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64And => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.and", indentation);
                     println!(
                         "{}let var{} = var{} & var{};",
                         indentation, expr_index, b, a
@@ -1649,7 +1413,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Or => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.or", indentation);
                     println!(
                         "{}let var{} = var{} | var{};",
                         indentation, expr_index, b, a
@@ -1660,7 +1423,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Xor => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.xor", indentation);
                     println!(
                         "{}let var{} = var{} ^ var{};",
                         indentation, expr_index, b, a
@@ -1671,7 +1433,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Shl => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.shl", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_shl(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1682,7 +1443,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64ShrS => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.shr_s", indentation);
                     println!(
                         "{}let var{} = var{}.wrapping_shr(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1693,7 +1453,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64ShrU => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.shr_u", indentation);
                     println!(
                         "{}let var{} = (var{} as u64).wrapping_shr(var{} as u32) as i64;",
                         indentation, expr_index, b, a
@@ -1704,7 +1463,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Rotl => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.rotl", indentation);
                     println!(
                         "{}let var{} = var{}.rotate_left(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1715,7 +1473,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64Rotr => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// i64.rotr", indentation);
                     println!(
                         "{}let var{} = var{}.rotate_right(var{} as u32);",
                         indentation, expr_index, b, a
@@ -1725,7 +1482,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32Abs => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f32.abs", indentation);
                     println!(
                         "{}let var{} = f32::from_bits(var{}.to_bits() & 0x7FFF_FFFF);",
                         indentation, expr_index, a
@@ -1735,7 +1491,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32Neg => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f32.neg", indentation);
                     println!(
                         "{}let var{} = f32::from_bits(var{}.to_bits() ^ 0x8000_0000);",
                         indentation, expr_index, a
@@ -1745,28 +1500,24 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32Ceil => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f32.ceil", indentation);
                     println!("{}let var{} = var{}.ceil();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F32Floor => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f32.floor", indentation);
                     println!("{}let var{} = var{}.floor();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F32Trunc => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f32.trunc", indentation);
                     println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F32Nearest => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f32.nearest", indentation);
                     println!(
                         "{0}let var{1} = {{
 {0}    let round = var{2}.round();
@@ -1787,7 +1538,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32Sqrt => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f32.sqrt", indentation);
                     println!("{}let var{} = var{}.sqrt();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
@@ -1795,7 +1545,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Add => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.add", indentation);
                     println!(
                         "{}let var{} = var{} + var{};",
                         indentation, expr_index, b, a
@@ -1806,7 +1555,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Sub => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.sub", indentation);
                     println!(
                         "{}let var{} = var{} - var{};",
                         indentation, expr_index, b, a
@@ -1817,7 +1565,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Mul => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.mul", indentation);
                     println!(
                         "{}let var{} = var{} * var{};",
                         indentation, expr_index, b, a
@@ -1828,7 +1575,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Div => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.div", indentation);
                     println!(
                         "{}let var{} = var{} / var{};",
                         indentation, expr_index, b, a
@@ -1839,7 +1585,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Min => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.min", indentation);
                     println!(
                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.min(var{3}) }};",
                         indentation, expr_index, b, a
@@ -1850,7 +1595,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Max => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.max", indentation);
                     println!(
                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
                         indentation, expr_index, b, a
@@ -1861,7 +1605,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Copysign => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f32.copysign", indentation);
                     println!(
                         "{}let var{} = f32::from_bits((var{}.to_bits() & !(1 << 31)) | (var{}.to_bits() & (1 << 31)));",
                         indentation, expr_index, b, a
@@ -1871,7 +1614,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F64Abs => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f64.abs", indentation);
                     println!(
                         "{}let var{} = f64::from_bits(var{}.to_bits() & 0x7FFF_FFFF_FFFF_FFFF);",
                         indentation, expr_index, a
@@ -1881,7 +1623,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F64Neg => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f64.neg", indentation);
                     println!(
                         "{}let var{} = f64::from_bits(var{}.to_bits() ^ 0x8000_0000_0000_0000);",
                         indentation, expr_index, a
@@ -1891,28 +1632,24 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F64Ceil => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f64.ceil", indentation);
                     println!("{}let var{} = var{}.ceil();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F64Floor => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f64.floor", indentation);
                     println!("{}let var{} = var{}.floor();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F64Trunc => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f64.trunc", indentation);
                     println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F64Nearest => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f64.nearest", indentation);
                     println!(
                         "{0}let var{1} = {{
 {0}    let round = var{2}.round();
@@ -1933,7 +1670,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F64Sqrt => {
                     let a = stack.pop().unwrap();
-                    println!("{}// f64.sqrt", indentation);
                     println!("{}let var{} = var{}.sqrt();", indentation, expr_index, a);
                     stack.push(expr_index);
                     expr_index += 1;
@@ -1941,7 +1677,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Add => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.add", indentation);
                     println!(
                         "{}let var{} = var{} + var{};",
                         indentation, expr_index, b, a
@@ -1952,7 +1687,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Sub => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.sub", indentation);
                     println!(
                         "{}let var{} = var{} - var{};",
                         indentation, expr_index, b, a
@@ -1963,7 +1697,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Mul => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.mul", indentation);
                     println!(
                         "{}let var{} = var{} * var{};",
                         indentation, expr_index, b, a
@@ -1974,7 +1707,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Div => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.div", indentation);
                     println!(
                         "{}let var{} = var{} / var{};",
                         indentation, expr_index, b, a
@@ -1985,7 +1717,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Min => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.min", indentation);
                     println!(
                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.min(var{3}) }};",
                         indentation, expr_index, b, a
@@ -1996,7 +1727,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Max => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.max", indentation);
                     println!(
                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
                         indentation, expr_index, b, a
@@ -2007,7 +1737,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Copysign => {
                     let a = stack.pop().unwrap();
                     let b = stack.pop().unwrap();
-                    println!("{}// f64.copysign", indentation);
                     println!(
                         "{}let var{} = f64::from_bits((var{}.to_bits() & !(1 << 63)) | (var{}.to_bits() & (1 << 63)));",
                         indentation, expr_index, b, a
@@ -2017,21 +1746,18 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I32WrapI64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i32.wrap/i64", indentation);
                     println!("{}let var{} = var{} as i32;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I32TruncSF32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i32.trunc_s/f32", indentation);
                     println!("{}let var{} = var{} as i32;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I32TruncUF32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i32.trunc_u/f32", indentation);
                     println!(
                         "{}let var{} = var{} as u32 as i32;",
                         indentation, expr_index, val
@@ -2041,14 +1767,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I32TruncSF64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i32.trunc_s/f64", indentation);
                     println!("{}let var{} = var{} as i32;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I32TruncUF64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i32.trunc_u/f64", indentation);
                     println!(
                         "{}let var{} = var{} as u32 as i32;",
                         indentation, expr_index, val
@@ -2058,14 +1782,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64ExtendSI32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i64.extend_s/i32", indentation);
                     println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I64ExtendUI32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i64.extend_u/i32", indentation);
                     println!(
                         "{}let var{} = var{} as u32 as i64;",
                         indentation, expr_index, val
@@ -2075,14 +1797,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64TruncSF32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i64.trunc_s/f32", indentation);
                     println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I64TruncUF32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i64.trunc_u/f32", indentation);
                     println!(
                         "{}let var{} = var{} as u64 as i64;",
                         indentation, expr_index, val
@@ -2092,14 +1812,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64TruncSF64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i64.trunc_s/f64", indentation);
                     println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I64TruncUF64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i64.trunc_u/f64", indentation);
                     println!(
                         "{}let var{} = var{} as u64 as i64;",
                         indentation, expr_index, val
@@ -2109,14 +1827,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32ConvertSI32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f32.convert_s/i32", indentation);
                     println!("{}let var{} = var{} as f32;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F32ConvertUI32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f32.convert_u/i32", indentation);
                     println!(
                         "{}let var{} = var{} as u32 as f32;",
                         indentation, expr_index, val
@@ -2126,14 +1842,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32ConvertSI64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f32.convert_s/i64", indentation);
                     println!("{}let var{} = var{} as f32;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F32ConvertUI64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f32.convert_u/i64", indentation);
                     println!(
                         "{}let var{} = var{} as u64 as f32;",
                         indentation, expr_index, val
@@ -2143,21 +1857,18 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32DemoteF64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f32.demote/f64", indentation);
                     println!("{}let var{} = var{} as f32;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F64ConvertSI32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f64.convert_s/i32", indentation);
                     println!("{}let var{} = var{} as f64;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F64ConvertUI32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f64.convert_u/i32", indentation);
                     println!(
                         "{}let var{} = var{} as u32 as f64;",
                         indentation, expr_index, val
@@ -2167,14 +1878,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F64ConvertSI64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f64.convert_s/i64", indentation);
                     println!("{}let var{} = var{} as f64;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 F64ConvertUI64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f64.convert_u/i64", indentation);
                     println!(
                         "{}let var{} = var{} as u64 as f64;",
                         indentation, expr_index, val
@@ -2184,14 +1893,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F64PromoteF32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f64.promote/f32", indentation);
                     println!("{}let var{} = var{} as f64;", indentation, expr_index, val);
                     stack.push(expr_index);
                     expr_index += 1;
                 }
                 I32ReinterpretF32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i32.reinterpret/f32", indentation);
                     println!(
                         "{}let var{} = var{}.to_bits() as i32;",
                         indentation, expr_index, val
@@ -2201,7 +1908,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 I64ReinterpretF64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// i64.reinterpret/f64", indentation);
                     println!(
                         "{}let var{} = var{}.to_bits() as i64;",
                         indentation, expr_index, val
@@ -2211,7 +1917,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F32ReinterpretI32 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f32.reinterpret/i32", indentation);
                     println!(
                         "{}let var{} = f32::from_bits(var{} as u32);",
                         indentation, expr_index, val
@@ -2221,7 +1926,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 F64ReinterpretI64 => {
                     let val = stack.pop().unwrap();
-                    println!("{}// f64.reinterpret/i64", indentation);
                     println!(
                         "{}let var{} = f64::from_bits(var{} as u64);",
                         indentation, expr_index, val
