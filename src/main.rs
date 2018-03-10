@@ -3,8 +3,13 @@ extern crate parity_wasm;
 use parity_wasm::deserialize_file;
 use parity_wasm::elements::{BlockType, CodeSection, ExportEntry, ExportSection, External, Func,
                             FuncBody, FunctionSection, FunctionType, ImportCountType, ImportEntry,
-                            Internal, Opcode, Type, TypeSection, ValueType};
+                            Internal, NameSection, Opcode, Section, Type, TypeSection, ValueType};
 use std::collections::BTreeMap;
+
+mod precedence;
+mod expr_builder;
+
+use expr_builder::ExprBuilder;
 
 fn to_rs_type(t: ValueType) -> &'static str {
     match t {
@@ -44,9 +49,15 @@ impl fmt::Display for Indentation {
 }
 
 fn main() {
-    let module = deserialize_file("wasmBoy/dist/wasm/index.untouched.wasm").unwrap();
+    let module = deserialize_file(
+        // "wasm-test-bed/target/wasm32-unknown-unknown/release/wasm_test_bed.wasm",
+        // "renderer/target/wasm32-unknown-unknown/release/rust-wasm-canvas.wasm",
+        "wasm/livesplit_core.wasm",
+        // "wasmBoy/dist/wasm/index.untouched.wasm",
+    ).unwrap();
     let module = module.parse_names().unwrap_or_else(|(_, m)| m);
-    // println!("{:#?}", module);
+    // println!("{:#?}", &module.code_section().unwrap().bodies()[87 - module.import_count(ImportCountType::Function)]);
+    // println!("{:?}", module);
     // return;
 
     let import_count = module.import_count(ImportCountType::Function);
@@ -54,6 +65,14 @@ fn main() {
     let fns: &FunctionSection = module.function_section().unwrap();
     let types: &TypeSection = module.type_section().unwrap();
     let exports: &ExportSection = module.export_section().unwrap();
+    let function_names = module
+        .sections()
+        .iter()
+        .filter_map(|s| match *s {
+            Section::Name(NameSection::Function(ref s)) => Some(s),
+            _ => None,
+        })
+        .next();
 
     let mut functions = Vec::new();
 
@@ -66,7 +85,7 @@ fn main() {
                 let fn_type = match *typ {
                     Type::Function(ref t) => t,
                 };
-                functions.push((import.field().to_owned(), fn_type, type_index));
+                functions.push((import.field().to_owned(), fn_type, type_index, None));
             }
         }
     }
@@ -74,19 +93,20 @@ fn main() {
     for function in fns.entries() {
         let type_index = function.type_ref();
         let Type::Function(ref fn_type) = types.types()[type_index as usize];
+        let real_name = function_names.and_then(|f| f.names().get(functions.len() as _));
         let name = format!("func{}", functions.len());
-        functions.push((name, fn_type, type_index));
+        functions.push((name, fn_type, type_index, real_name));
     }
 
     println!(
-        "#![allow(unreachable_code, dead_code, unused_assignments, unused_mut, unused_variables, non_snake_case)]
+        "#![allow(unreachable_code, dead_code, unused_assignments, unused_mut, unused_variables, non_snake_case, non_upper_case_globals, unused_parens)]
 
 pub const PAGE_SIZE: usize = 64 << 10;
 
 pub trait Imports {{"
     );
 
-    for &(ref name, fn_type, _) in &functions[..import_count] {
+    for &(ref name, fn_type, ..) in &functions[..import_count] {
         print!("    fn {}", name);
         print_signature(fn_type, false);
         println!(";");
@@ -239,7 +259,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
     for export in exports.entries() {
         let export: &ExportEntry = export;
         if let &Internal::Function(fn_index) = export.internal() {
-            let (ref name, ref fn_type, _) = functions[fn_index as usize];
+            let (ref name, ref fn_type, ..) = functions[fn_index as usize];
             print!("    pub fn {}", export.field());
             print_signature(fn_type, false);
             println!(" {{");
@@ -266,6 +286,9 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
         };
         let fn_index = import_count + i;
         // TODO Ensure there's no collisions with the exports
+        if let Some(real_name) = functions[fn_index].3 {
+            println!("    // {}", real_name);
+        }
         print!("    fn func{}", fn_index);
         print_signature(fn_type, true);
         println!(" {{");
@@ -280,7 +303,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
             }
         }
 
-        let mut stack = Vec::new();
+        // TODO Type Inference
+        let mut expr_builder = ExprBuilder::new();
         let mut block_types = Vec::new();
         let mut indentation = Indentation(2);
         let mut loop_count = 0;
@@ -288,7 +312,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
         block_types.push((
             None,
             if let Some(_) = fn_type.return_type() {
-                Some(0)
+                Some((precedence::PATH, String::new()))
             } else {
                 None
             },
@@ -302,13 +326,14 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     println!("{}unreachable!();", indentation);
                 }
                 Nop => {
-                    assert!(stack.is_empty());
+                    assert!(expr_builder.is_empty());
                 }
                 Block(block_type) => {
                     let block_type = if let BlockType::Value(ty) = block_type {
-                        println!("{}let var{}: {};", indentation, expr_index, to_rs_type(ty));
+                        let var_name = format!("var{}", expr_index);
+                        println!("{}let {}: {};", indentation, var_name, to_rs_type(ty));
                         expr_index += 1;
-                        Some(expr_index - 1)
+                        Some((precedence::PATH, var_name))
                     } else {
                         None
                     };
@@ -319,9 +344,10 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 Loop(block_type) => {
                     let block_type = if let BlockType::Value(ty) = block_type {
-                        println!("{}let var{}: {};", indentation, expr_index, to_rs_type(ty));
+                        let dst = format!("var{}", expr_index);
+                        println!("{}let {}: {};", indentation, dst, to_rs_type(ty));
                         expr_index += 1;
-                        Some(expr_index - 1)
+                        Some((precedence::PATH, dst))
                     } else {
                         None
                     };
@@ -331,23 +357,24 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     block_types.push((Some((loop_count - 1, true)), block_type));
                 }
                 If(block_type) => {
-                    let expr = stack.pop().unwrap();
+                    let expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
                     let block_type = if let BlockType::Value(ty) = block_type {
-                        println!("{}let var{}: {};", indentation, expr_index, to_rs_type(ty));
+                        let dst = format!("var{}", expr_index);
+                        println!("{}let {}: {};", indentation, dst, to_rs_type(ty));
                         expr_index += 1;
-                        Some(expr_index - 1)
+                        Some((precedence::PATH, dst))
                     } else {
                         None
                     };
-                    println!("{}if var{} != 0 {{", indentation, expr);
+                    println!("{}if {} != 0 {{", indentation, expr);
                     indentation.0 += 1;
                     block_types.push((None, block_type));
                 }
                 Else => {
-                    let &(_, block_type) = block_types.last().unwrap();
-                    if let Some(target_var) = block_type {
-                        let expr = stack.pop().unwrap();
-                        println!("{}var{} = var{};", indentation, target_var, expr);
+                    let &(_, ref block_type) = block_types.last().unwrap();
+                    if let &Some((_, ref target_var)) = block_type {
+                        let (_, expr) = expr_builder.pop().unwrap();
+                        println!("{}{} = {};", indentation, target_var, expr);
                     }
                     indentation.0 -= 1;
                     println!("{}}} else {{", indentation);
@@ -356,11 +383,11 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 End => {
                     let (is_loop, block_type) = block_types.pop().unwrap();
                     if is_loop.is_some() {
-                        if let Some(target_var) = block_type {
+                        if let Some((precedence, target_var)) = block_type {
                             // TODO Handle Result
-                            if let Some(expr) = stack.pop() {
-                                println!("{}var{} = var{};", indentation, target_var, expr);
-                                stack.push(target_var);
+                            if let Some((_, expr)) = expr_builder.pop() {
+                                println!("{}{} = {};", indentation, target_var, expr);
+                                expr_builder.push((precedence, target_var));
                                 println!("{}break;", indentation);
                             } else {
                                 println!("{}// There should've been a loop expression value here, but this may be unreachable", indentation);
@@ -371,10 +398,10 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         }
                     } else {
                         if !block_types.is_empty() {
-                            if let Some(target_var) = block_type {
-                                if let Some(expr) = stack.pop() {
-                                    println!("{}var{} = var{};", indentation, target_var, expr);
-                                    stack.push(target_var);
+                            if let Some((precedence, target_var)) = block_type {
+                                if let Some((_, expr)) = expr_builder.pop() {
+                                    println!("{}{} = {};", indentation, target_var, expr);
+                                    expr_builder.push((precedence, target_var));
                                 } else {
                                     println!("{}// This seems to be unreachable", indentation);
                                     println!("{}unreachable!()", indentation);
@@ -383,10 +410,10 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         }
                     }
                     if block_types.is_empty() {
-                        if let Some(expr) = stack.pop() {
-                            println!("{}var{}", indentation, expr);
+                        if let Some((_, expr)) = expr_builder.pop() {
+                            println!("{}{}", indentation, expr);
                         }
-                        assert!(stack.is_empty());
+                        assert!(expr_builder.is_empty());
                     }
                     indentation.0 -= 1;
                     println!("{}}}", indentation);
@@ -407,7 +434,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     );
                 }
                 BrIf(relative_depth) => {
-                    let expr = stack.pop().unwrap();
+                    let expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
                     let &(loop_info, _) = block_types
                         .iter()
                         .rev()
@@ -415,7 +442,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         .unwrap();
                     let (label, is_a_loop) = loop_info.unwrap();
 
-                    println!("{}if var{} != 0 {{", indentation, expr);
+                    println!("{}if {} != 0 {{", indentation, expr);
                     println!(
                         "{}    {} 'label{};",
                         indentation,
@@ -425,8 +452,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     println!("{}}}", indentation);
                 }
                 BrTable(ref table, default_depth) => {
-                    let expr = stack.pop().unwrap();
-                    println!("{}match var{} {{", indentation, expr);
+                    let (_, expr) = expr_builder.pop().unwrap();
+                    println!("{}match {} {{", indentation, expr);
                     indentation.0 += 1;
                     for (index, &relative_depth) in table.iter().enumerate() {
                         let &(loop_info, _) = block_types
@@ -459,14 +486,14 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     println!("{}}}", indentation);
                 }
                 Return => {
-                    if let Some(expr) = stack.pop() {
-                        println!("{}return var{};", indentation, expr);
+                    if let Some((_, expr)) = expr_builder.pop() {
+                        println!("{}return {};", indentation, expr);
                     } else {
                         println!("{}return;", indentation);
                     }
                 }
                 Call(fn_index) => {
-                    let (ref name, fn_type, _) = functions[fn_index as usize];
+                    let (ref name, fn_type, _, real_name) = functions[fn_index as usize];
                     print!("{}", indentation);
                     if fn_type.return_type().is_some() {
                         print!("let var{} = ", expr_index);
@@ -477,16 +504,20 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         print!("self.");
                     }
                     print!("{}(", name);
-                    let index = stack.len() - fn_type.params().len();
-                    for (i, val) in stack.drain(index..).enumerate() {
+                    let index = expr_builder.len() - fn_type.params().len();
+                    for (i, (_, expr)) in expr_builder.inner().drain(index..).enumerate() {
                         if i != 0 {
                             print!(", ");
                         }
-                        print!("var{}", val);
+                        print!("{}", expr);
                     }
-                    println!(");");
+                    if let Some(real_name) = real_name {
+                        println!("); // {}", real_name);
+                    } else {
+                        println!(");");
+                    }
                     if fn_type.return_type().is_some() {
-                        stack.push(expr_index);
+                        expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                         expr_index += 1;
                     }
                 }
@@ -496,1442 +527,1197 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     if fn_type.return_type().is_some() {
                         print!("let var{} = ", expr_index);
                     }
-                    let fn_ptr = stack.pop().unwrap();
-                    print!("self.call_indirect{}(var{}", type_index, fn_ptr);
-                    let index = stack.len() - fn_type.params().len();
-                    for val in stack.drain(index..) {
-                        print!(", var{}", val);
+                    let (_, fn_ptr) = expr_builder.pop().unwrap();
+                    print!("self.call_indirect{}({}", type_index, fn_ptr);
+                    let index = expr_builder.len() - fn_type.params().len();
+                    for (_, expr) in expr_builder.inner().drain(index..) {
+                        print!(", {}", expr);
                     }
                     println!(");");
                     if fn_type.return_type().is_some() {
-                        stack.push(expr_index);
+                        expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                         expr_index += 1;
                     }
                 }
                 Drop => {
-                    stack.pop().unwrap();
+                    expr_builder.pop().unwrap();
                 }
                 Select => {
-                    let c = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = if var{} != 0 {{ var{} }} else {{ var{} }};",
-                        indentation, expr_index, c, a, b
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    // TODO Should not be short circuiting
+                    let c = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
+                    let (_, b) = expr_builder.pop().unwrap();
+                    let (_, a) = expr_builder.pop().unwrap();
+                    expr_builder.push((
+                        precedence::PATH,
+                        format!("(if {} != 0 {{ {} }} else {{ {} }})", c, a, b),
+                    ));
                 }
                 GetLocal(i) => {
-                    println!("{}let var{} = var{};", indentation, expr_index, i);
-                    stack.push(expr_index);
+                    // Can't be inline in an expression since it may be
+                    // overwritten until it's used.
+                    let dst = format!("var{}", expr_index);
+                    println!("{}let {} = var{};", indentation, dst, i);
                     expr_index += 1;
+                    expr_builder.push((precedence::PATH, dst));
                 }
                 SetLocal(i) => {
-                    let val = stack.pop().unwrap();
-                    println!("{}var{} = var{};", indentation, i, val);
+                    let (_, expr) = expr_builder.pop().unwrap();
+                    println!("{}var{} = {};", indentation, i, expr);
                 }
                 TeeLocal(i) => {
-                    let val = *stack.last().unwrap();
-                    println!("{}var{} = var{};", indentation, i, val);
+                    let (_, expr) = expr_builder.pop().unwrap();
+                    println!("{}var{} = {};", indentation, i, expr);
+                    let dst = format!("var{}", expr_index);
+                    println!("{}let {} = var{};", indentation, dst, i);
+                    expr_index += 1;
+                    expr_builder.push((precedence::PATH, dst));
                 }
                 GetGlobal(i) => {
                     let global = &globals[i as usize];
                     let name = &global.name;
-                    let prefix = if global.is_mutable { "self." } else { "Self::" };
-                    println!("{}let var{} = {}{};", indentation, expr_index, prefix, name);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    if global.is_mutable {
+                        let dst = format!("var{}", expr_index);
+                        println!("{}let {} = self.{};", indentation, dst, name);
+                        expr_index += 1;
+                        expr_builder.push((precedence::PATH, dst));
+                    } else {
+                        expr_builder.push((precedence::PATH, format!("Self::{}", name)));
+                    }
                 }
                 SetGlobal(i) => {
-                    let val = stack.pop().unwrap();
+                    let (_, expr) = expr_builder.pop().unwrap();
                     let global = &globals[i as usize];
                     let name = &global.name;
                     assert!(global.is_mutable);
-                    println!("{}self.{} = var{};", indentation, name, val);
+                    println!("{}self.{} = {};", indentation, name, expr);
                 }
                 I32Load(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load32(var{} as usize + {}) as i32;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load32({} as usize{}) as i32;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I64Load(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load64(var{} as usize + {}) as i64;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load64({} as usize{}) as i64;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 F32Load(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = f32::from_bits(self.mem.load32(var{} as usize + {}) as u32);",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = f32::from_bits(self.mem.load32({} as usize{}));",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 F64Load(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = f64::from_bits(self.mem.load64(var{} as usize + {}) as u64);",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = f64::from_bits(self.mem.load64({} as usize{}));",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I32Load8S(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load8(var{} as usize + {}) as i8 as i32;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load8({} as usize{}) as i8 as i32;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I32Load8U(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load8(var{} as usize + {}) as i32;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load8({} as usize{}) as i32;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I32Load16S(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load16(var{} as usize + {}) as i16 as i32;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load16({} as usize{}) as i16 as i32;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I32Load16U(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load16(var{} as usize + {}) as i32;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load16({} as usize{}) as i32;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
-                I64Load8S(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = self.mem.load8(var{} as usize + {}) as i8 as i64;",
-                        indentation, expr_index, addr, offset
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I64Load8S(_log_align, offset) => {
+                //                     let addr = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = self.mem.load8(var{} as usize + {}) as i8 as i64;",
+                //                         indentation, expr_index, addr, offset
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I64Load8U(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load8(var{} as usize + {}) as i64;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load8({} as usize{}) as i64;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I64Load16S(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load16(var{} as usize + {}) as i16 as i64;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load16({} as usize{}) as i16 as i64;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
-                I64Load16U(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = self.mem.load16(var{} as usize + {}) as i64;",
-                        indentation, expr_index, addr, offset
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I64Load16U(_log_align, offset) => {
+                //                     let addr = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = self.mem.load16(var{} as usize + {}) as i64;",
+                //                         indentation, expr_index, addr, offset
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I64Load32S(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load32(var{} as usize + {}) as i32 as i64;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load32({} as usize{}) as i32 as i64;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I64Load32U(_log_align, offset) => {
-                    let addr = stack.pop().unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}let var{} = self.mem.load32(var{} as usize + {}) as i64;",
-                        indentation, expr_index, addr, offset
+                        "{}let var{} = self.mem.load32({} as usize{}) as i64;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 I32Store(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store32(var{} as usize + {}, var{} as u32);",
-                        indentation, addr, offset, value
+                        "{}self.mem.store32({} as usize{}, {} as u32);",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 I64Store(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store64(var{} as usize + {}, var{} as u64);",
-                        indentation, addr, offset, value
+                        "{}self.mem.store64({} as usize{}, {} as u64);",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 F32Store(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::METHOD_CALL).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store32(var{} as usize + {}, var{}.to_bits());",
-                        indentation, addr, offset, value
+                        "{}self.mem.store32({} as usize{}, {}.to_bits());",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 F64Store(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::METHOD_CALL).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store64(var{} as usize + {}, var{}.to_bits());",
-                        indentation, addr, offset, value
+                        "{}self.mem.store64({} as usize{}, {}.to_bits());",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 I32Store8(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store8(var{} as usize + {}, var{} as u8);",
-                        indentation, addr, offset, value
+                        "{}self.mem.store8({} as usize{}, {} as u8);",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 I32Store16(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store16(var{} as usize + {}, var{} as u16);",
-                        indentation, addr, offset, value
+                        "{}self.mem.store16({} as usize{}, {} as u16);",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 I64Store8(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store8(var{} as usize + {}, var{} as u8);",
-                        indentation, addr, offset, value
+                        "{}self.mem.store8({} as usize{}, {} as u8);",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 I64Store16(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store16(var{} as usize + {}, var{} as u16);",
-                        indentation, addr, offset, value
+                        "{}self.mem.store16({} as usize{}, {} as u16);",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
                 I64Store32(_log_align, offset) => {
-                    let value = stack.pop().unwrap();
-                    let addr = stack.pop().unwrap();
+                    let value = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
-                        "{}self.mem.store32(var{} as usize + {}, var{} as u32);",
-                        indentation, addr, offset, value
+                        "{}self.mem.store32({} as usize{}, {} as u32);",
+                        indentation,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        },
+                        value
                     );
                 }
-                CurrentMemory(_) => {
-                    println!("{}let var{} = self.mem.size();", indentation, expr_index);
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 CurrentMemory(_) => {
+                //                     println!("{}let var{} = self.mem.size();", indentation, expr_index);
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 GrowMemory(_) => {
-                    let pages = stack.pop().unwrap();
+                    let pages = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    let dst = format!("var{}", expr_index);
                     println!(
-                        "{}let var{} = self.mem.grow(var{} as usize);",
-                        indentation, expr_index, pages
+                        "{}let {} = self.mem.grow({} as usize);",
+                        indentation, dst, pages
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, dst));
                     expr_index += 1;
                 }
                 I32Const(c) => {
-                    println!("{}let var{} = {}i32;", indentation, expr_index, c);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.push((precedence::PATH, format!("{}i32", c)));
                 }
                 I64Const(c) => {
-                    println!("{}let var{} = {}i64;", indentation, expr_index, c);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.push((precedence::PATH, format!("{}i64", c)));
                 }
                 F32Const(c) => {
-                    println!(
-                        "{}let var{} = f32::from_bits({}u32);",
-                        indentation, expr_index, c as u32
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.push((
+                        precedence::FUNCTION_CALL,
+                        format!("f32::from_bits({:#X})", c as u32),
+                    ));
                 }
                 F64Const(c) => {
-                    println!(
-                        "{}let var{} = f64::from_bits({}u64);",
-                        indentation, expr_index, c as u64
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.push((
+                        precedence::FUNCTION_CALL,
+                        format!("f64::from_bits({:#X})", c as u64),
+                    ));
                 }
                 I32Eqz => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} == 0) as i32;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::COMPARISON, precedence::AS, |a| {
+                        format!("({} == 0) as i32", a)
+                    });
                 }
                 I32Eq => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} == var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} == {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32Ne => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} != var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} != {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32LtS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} < var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::MAX,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("(({}) < {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32LtU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u32) < (var{} as u32)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("(({} as u32) < {} as u32) as i32", a, b)
+                    });
                 }
                 I32GtS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} > var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} > {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32GtU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u32) > (var{} as u32)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u32 > {} as u32) as i32", a, b)
+                    });
                 }
                 I32LeS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} <= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} <= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32LeU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u32) <= (var{} as u32)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u32 <= {} as u32) as i32", a, b)
+                    });
                 }
                 I32GeS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} >= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} >= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32GeU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u32) >= (var{} as u32)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u32 >= {} as u32) as i32", a, b)
+                    });
                 }
                 I64Eqz => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} == 0) as i32;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::COMPARISON, precedence::AS, |a| {
+                        format!("({} == 0) as i32", a)
+                    });
                 }
                 I64Eq => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} == var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} == {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I64Ne => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} != var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} != {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I64LtS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} < var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::MAX,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("(({}) < {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I64LtU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u64) < (var{} as u64)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("(({} as u64) < {} as u64) as i32", a, b)
+                    });
                 }
                 I64GtS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} > var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} > {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I64GtU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u64) > (var{} as u64)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u64 > {} as u64) as i32", a, b)
+                    });
                 }
                 I64LeS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} <= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} <= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I64LeU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u64) <= (var{} as u64)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u64 <= {} as u64) as i32", a, b)
+                    });
                 }
                 I64GeS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} >= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} >= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I64GeU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u64) >= (var{} as u64)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u64 >= {} as u64) as i32", a, b)
+                    });
                 }
                 F32Eq => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} == var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} == {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F32Ne => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} != var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} != {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F32Lt => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} < var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("(({}) < {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F32Gt => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} > var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} > {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F32Le => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} <= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} <= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F32Ge => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} >= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} >= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Eq => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} == var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} == {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Ne => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} != var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} != {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Lt => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} < var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("(({}) < {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Gt => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} > var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} > {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Le => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} <= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} <= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Ge => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} >= var{}) as i32;",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::COMPARISON,
+                        precedence::COMPARISON,
+                        precedence::AS,
+                        |a, b| format!("({} >= {}) as i32", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32Clz => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.leading_zeros() as i32;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.leading_zeros() as i32", a)
+                    });
                 }
                 I32Ctz => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.trailing_zeros() as i32;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.trailing_zeros() as i32", a)
+                    });
                 }
-                I32Popcnt => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.count_ones() as i32;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I32Popcnt => {
+                //                     let a = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{}.count_ones() as i32;",
+                //                         indentation, expr_index, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I32Add => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_add(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_add({})", a, b)
+                    });
                 }
                 I32Sub => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_sub(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_sub({})", a, b)
+                    });
                 }
                 I32Mul => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_mul(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_mul({})", a, b)
+                    });
                 }
                 I32DivS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} / var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::DIV, |a, b| format!("{} / {}", a, b));
                 }
                 I32DivU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u32) / (var{} as u32)) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u32 / {} as u32) as i32", a, b)
+                    });
                 }
                 I32RemS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_rem(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_rem({})", a, b)
+                    });
                 }
                 I32RemU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} as u32).wrapping_rem(var{} as u32) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u32).wrapping_rem({} as u32) as i32", a, b)
+                    });
                 }
                 I32And => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} & var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::BIT_AND, |a, b| format!("{} & {}", a, b));
                 }
                 I32Or => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} | var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::BIT_OR, |a, b| format!("{} | {}", a, b));
                 }
                 I32Xor => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} ^ var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::BIT_XOR, |a, b| format!("{} ^ {}", a, b));
                 }
                 I32Shl => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_shl(var{} as u32);",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.wrapping_shl({} as u32)", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32ShrS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_shr(var{} as u32);",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.wrapping_shr({} as u32)", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32ShrU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} as u32).wrapping_shr(var{} as u32) as i32;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u32).wrapping_shr({} as u32) as i32", a, b)
+                    });
                 }
                 I32Rotl => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.rotate_left(var{} as u32);",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.rotate_left({} as u32)", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
-                I32Rotr => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.rotate_right(var{} as u32);",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I32Rotr => {
+                //                     let a = stack.pop().unwrap();
+                //                     let b = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{}.rotate_right(var{} as u32);",
+                //                         indentation, expr_index, b, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I64Clz => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.leading_zeros() as i64;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.leading_zeros() as i64", a)
+                    });
                 }
                 I64Ctz => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.trailing_zeros() as i64;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.trailing_zeros() as i64", a)
+                    });
                 }
-                I64Popcnt => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.count_ones() as i64;",
-                        indentation, expr_index, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I64Popcnt => {
+                //                     let a = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{}.count_ones() as i64;",
+                //                         indentation, expr_index, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I64Add => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_add(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_add({})", a, b)
+                    });
                 }
                 I64Sub => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_sub(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_sub({})", a, b)
+                    });
                 }
                 I64Mul => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_mul(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_mul({})", a, b)
+                    });
                 }
                 I64DivS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} / var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::DIV, |a, b| format!("{} / {}", a, b));
                 }
                 I64DivU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = ((var{} as u64) / (var{} as u64)) as i64;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u64 / {} as u64) as i64", a, b)
+                    });
                 }
-                I64RemS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_rem(var{});",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I64RemS => {
+                //                     let a = stack.pop().unwrap();
+                //                     let b = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{}.wrapping_rem(var{});",
+                //                         indentation, expr_index, b, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I64RemU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} as u64).wrapping_rem(var{} as u64) as i64;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u64).wrapping_rem({} as u64) as i64", a, b)
+                    });
                 }
                 I64And => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} & var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::BIT_AND, |a, b| format!("{} & {}", a, b));
                 }
                 I64Or => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} | var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::BIT_OR, |a, b| format!("{} | {}", a, b));
                 }
                 I64Xor => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} ^ var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::BIT_XOR, |a, b| format!("{} ^ {}", a, b));
                 }
                 I64Shl => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_shl(var{} as u32);",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.wrapping_shl({} as u32)", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
+                //                 I64Shl => {
+                //                     let a = stack.pop().unwrap();
+                //                     let b = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{}.wrapping_shl(var{} as u32);",
+                //                         indentation, expr_index, b, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I64ShrS => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.wrapping_shr(var{} as u32);",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.wrapping_shr({} as u32)", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I64ShrU => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = (var{} as u64).wrapping_shr(var{} as u32) as i64;",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary(precedence::AS, |a, b| {
+                        format!("({} as u64).wrapping_shr({} as u32) as i64", a, b)
+                    });
                 }
                 I64Rotl => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.rotate_left(var{} as u32);",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.rotate_left({} as u32)", a, b),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
-                I64Rotr => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.rotate_right(var{} as u32);",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I64Rotr => {
+                //                     let a = stack.pop().unwrap();
+                //                     let b = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{}.rotate_right(var{} as u32);",
+                //                         indentation, expr_index, b, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F32Abs => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = f32::from_bits(var{}.to_bits() & 0x7FFF_FFFF);",
-                        indentation, expr_index, a
+                    expr_builder.unary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::FUNCTION_CALL,
+                        |a| format!("f32::from_bits({}.to_bits() & 0x7FFF_FFFF)", a),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F32Neg => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = f32::from_bits(var{}.to_bits() ^ 0x8000_0000);",
-                        indentation, expr_index, a
+                    expr_builder.unary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::FUNCTION_CALL,
+                        |a| format!("f32::from_bits({}.to_bits() ^ 0x8000_0000)", a),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F32Ceil => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.ceil();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.ceil()", a));
                 }
                 F32Floor => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.floor();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.floor()", a));
                 }
-                F32Trunc => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 F32Trunc => {
+                //                     let a = stack.pop().unwrap();
+                //                     println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F32Nearest => {
-                    let a = stack.pop().unwrap();
+                    let (_, val) = expr_builder.pop().unwrap();
                     println!(
                         "{0}let var{1} = {{
-{0}    let round = var{2}.round();
-{0}    if var{2}.fract().abs() != 0.5 {{
+{0}    let val = {2};
+{0}    let round = val.round();
+{0}    if val.fract().abs() != 0.5 {{
 {0}        round
 {0}    }} else if round % 2.0 == 1.0 {{
-{0}        var{2}.floor()
+{0}        val.floor()
 {0}    }} else if round % 2.0 == -1.0 {{
-{0}        var{2}.ceil()
+{0}        val.ceil()
 {0}    }} else {{
 {0}        round
 {0}    }}
 {0}}};",
-                        indentation, expr_index, a
+                        indentation, expr_index, val
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
-                F32Sqrt => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.sqrt();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 F32Sqrt => {
+                //                     let a = stack.pop().unwrap();
+                //                     println!("{}let var{} = var{}.sqrt();", indentation, expr_index, a);
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F32Add => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} + var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::ADD, |a, b| format!("{} + {}", a, b));
                 }
                 F32Sub => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} - var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::SUB, |a, b| format!("{} - {}", a, b));
                 }
                 F32Mul => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} * var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::MUL, |a, b| format!("{} * {}", a, b));
                 }
                 F32Div => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} / var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::DIV, |a, b| format!("{} / {}", a, b));
                 }
                 F32Min => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.min(var{3}) }};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    let (_, b) = expr_builder.pop().unwrap();
+                    let (_, a) = expr_builder.pop().unwrap();
+                    expr_builder.push((
+                        precedence::PATH,
+                        format!("({{ let a = {}; let b = {}; if a.is_nan() || b.is_nan() {{ a }} else {{ a.min(b) }} }})", a, b),
+                    ));
                 }
-                F32Max => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 F32Max => {
+                //                     let a = stack.pop().unwrap();
+                //                     let b = stack.pop().unwrap();
+                //                     println!(
+                //                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
+                //                         indentation, expr_index, b, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F32Copysign => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = f32::from_bits((var{}.to_bits() & !(1 << 31)) | (var{}.to_bits() & (1 << 31)));",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::METHOD_CALL,
+                        precedence::FUNCTION_CALL,
+                        |a, b| {
+                            format!("f32::from_bits(({}.to_bits() & !(1 << 31)) | ({}.to_bits() & (1 << 31)))", a, b)
+                        },
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Abs => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = f64::from_bits(var{}.to_bits() & 0x7FFF_FFFF_FFFF_FFFF);",
-                        indentation, expr_index, a
+                    expr_builder.unary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::FUNCTION_CALL,
+                        |a| format!("f64::from_bits({}.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)", a),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Neg => {
-                    let a = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = f64::from_bits(var{}.to_bits() ^ 0x8000_0000_0000_0000);",
-                        indentation, expr_index, a
+                    expr_builder.unary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::FUNCTION_CALL,
+                        |a| format!("f64::from_bits({}.to_bits() ^ 0x8000_0000_0000_0000)", a),
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 F64Ceil => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.ceil();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.ceil()", a));
                 }
                 F64Floor => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.floor();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.floor()", a));
                 }
-                F64Trunc => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 F64Trunc => {
+                //                     let a = stack.pop().unwrap();
+                //                     println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F64Nearest => {
-                    let a = stack.pop().unwrap();
+                    let (_, val) = expr_builder.pop().unwrap();
                     println!(
                         "{0}let var{1} = {{
-{0}    let round = var{2}.round();
-{0}    if var{2}.fract().abs() != 0.5 {{
+{0}    let val = {2};
+{0}    let round = val.round();
+{0}    if val.fract().abs() != 0.5 {{
 {0}        round
 {0}    }} else if round % 2.0 == 1.0 {{
-{0}        var{2}.floor()
+{0}        val.floor()
 {0}    }} else if round % 2.0 == -1.0 {{
-{0}        var{2}.ceil()
+{0}        val.ceil()
 {0}    }} else {{
 {0}        round
 {0}    }}
 {0}}};",
-                        indentation, expr_index, a
+                        indentation, expr_index, val
                     );
-                    stack.push(expr_index);
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
                 F64Sqrt => {
-                    let a = stack.pop().unwrap();
-                    println!("{}let var{} = var{}.sqrt();", indentation, expr_index, a);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.sqrt()", a));
                 }
                 F64Add => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} + var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::ADD, |a, b| format!("{} + {}", a, b));
                 }
                 F64Sub => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} - var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::SUB, |a, b| format!("{} - {}", a, b));
                 }
                 F64Mul => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} * var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::MUL, |a, b| format!("{} * {}", a, b));
                 }
                 F64Div => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} / var{};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.binary_lr(precedence::DIV, |a, b| format!("{} / {}", a, b));
                 }
-                F64Min => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.min(var{3}) }};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
-                F64Max => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
-                        indentation, expr_index, b, a
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 F64Min => {
+                //                     let a = stack.pop().unwrap();
+                //                     let b = stack.pop().unwrap();
+                //                     println!(
+                //                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.min(var{3}) }};",
+                //                         indentation, expr_index, b, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
+                //                 F64Max => {
+                //                     let a = stack.pop().unwrap();
+                //                     let b = stack.pop().unwrap();
+                //                     println!(
+                //                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
+                //                         indentation, expr_index, b, a
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F64Copysign => {
-                    let a = stack.pop().unwrap();
-                    let b = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = f64::from_bits((var{}.to_bits() & !(1 << 63)) | (var{}.to_bits() & (1 << 63)));",
-                        indentation, expr_index, b, a
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::METHOD_CALL,
+                        precedence::FUNCTION_CALL,
+                        |a, b| {
+                            format!("f64::from_bits(({}.to_bits() & !(1 << 63)) | ({}.to_bits() & (1 << 63)))", a, b)
+                        },
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
                 I32WrapI64 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as i32;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as i32", a));
                 }
                 I32TruncSF32 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as i32;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as i32", a));
                 }
-                I32TruncUF32 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u32 as i32;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I32TruncUF32 => {
+                //                     let val = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{} as u32 as i32;",
+                //                         indentation, expr_index, val
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I32TruncSF64 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as i32;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as i32", a));
                 }
                 I32TruncUF64 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u32 as i32;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u32 as i32", a));
                 }
                 I64ExtendSI32 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as i64", a));
                 }
                 I64ExtendUI32 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u32 as i64;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u32 as i64", a));
                 }
-                I64TruncSF32 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 I64TruncSF32 => {
+                //                     let val = stack.pop().unwrap();
+                //                     println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 I64TruncUF32 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u64 as i64;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u64 as i64", a));
                 }
                 I64TruncSF64 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as i64", a));
                 }
                 I64TruncUF64 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u64 as i64;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u64 as i64", a));
                 }
                 F32ConvertSI32 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as f32;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as f32", a));
                 }
-                F32ConvertUI32 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u32 as f32;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 F32ConvertUI32 => {
+                //                     let val = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = var{} as u32 as f32;",
+                //                         indentation, expr_index, val
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F32ConvertSI64 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as f32;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as f32", a));
                 }
                 F32ConvertUI64 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u64 as f32;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u64 as f32", a));
                 }
                 F32DemoteF64 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as f32;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as f32", a));
                 }
                 F64ConvertSI32 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as f64;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as f64", a));
                 }
                 F64ConvertUI32 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u32 as f64;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u32 as f64", a));
                 }
                 F64ConvertSI64 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as f64;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as f64", a));
                 }
                 F64ConvertUI64 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{} as u64 as f64;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u64 as f64", a));
                 }
                 F64PromoteF32 => {
-                    let val = stack.pop().unwrap();
-                    println!("{}let var{} = var{} as f64;", indentation, expr_index, val);
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary(precedence::AS, |a| format!("{} as f64", a));
                 }
                 I32ReinterpretF32 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.to_bits() as i32;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.to_bits() as i32", a)
+                    });
                 }
                 I64ReinterpretF64 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = var{}.to_bits() as i64;",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.to_bits() as i64", a)
+                    });
                 }
-                F32ReinterpretI32 => {
-                    let val = stack.pop().unwrap();
-                    println!(
-                        "{}let var{} = f32::from_bits(var{} as u32);",
-                        indentation, expr_index, val
-                    );
-                    stack.push(expr_index);
-                    expr_index += 1;
-                }
+                //                 F32ReinterpretI32 => {
+                //                     let val = stack.pop().unwrap();
+                //                     println!(
+                //                         "{}let var{} = f32::from_bits(var{} as u32);",
+                //                         indentation, expr_index, val
+                //                     );
+                //                     stack.push(expr_index);
+                //                     expr_index += 1;
+                //                 }
                 F64ReinterpretI64 => {
-                    let val = stack.pop().unwrap();
+                    expr_builder.unary_individual(precedence::AS, precedence::FUNCTION_CALL, |a| {
+                        format!("f64::from_bits({} as u64)", a)
+                    });
+                }
+                ref e => {
                     println!(
-                        "{}let var{} = f64::from_bits(var{} as u64);",
-                        indentation, expr_index, val
+                        "{}// Unhandled {:?} (Stack: {:?})",
+                        indentation, e, expr_builder
                     );
-                    stack.push(expr_index);
-                    expr_index += 1;
                 }
             }
         }
@@ -1964,7 +1750,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
         match ptr {{"
             );
             for (fn_ptr, fn_index) in fns {
-                let (ref name, fn_type, _) = functions[fn_index as usize];
+                let (ref name, fn_type, _, real_name) = functions[fn_index as usize];
                 print!("            {} => ", fn_ptr);
                 if (fn_index as usize) < import_count {
                     print!("self.imports.");
@@ -1978,7 +1764,11 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     }
                     print!("var{}", i);
                 }
-                println!("),");
+                if let Some(real_name) = real_name {
+                    println!("), // {}", real_name);
+                } else {
+                    println!("),");
+                }
             }
             println!(
                 r#"            _ => panic!("Invalid Function Pointer"),
