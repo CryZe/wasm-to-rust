@@ -126,13 +126,13 @@ use std::fmt;
 
 impl fmt::Display for Formatted {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // if self.inner_precedence > self.outer_precedence
-        //     || (self.inner_precedence == precedence::COMPARISON
-        //         && self.outer_precedence == precedence::COMPARISON)
-        // {
-        write!(f, "({})", self.s)
-        // } else {
-        //     write!(f, "{}", self.s)
-        // }
+        if self.inner_precedence > self.outer_precedence
+            || (self.inner_precedence == precedence::COMPARISON
+                && self.outer_precedence == precedence::COMPARISON)
+        {
+            write!(f, "({})", self.s)
+        } else {
+            write!(f, "{}", self.s)
+        }
     }
 }

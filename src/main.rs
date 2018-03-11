@@ -50,21 +50,26 @@ impl fmt::Display for Indentation {
 
 fn main() {
     let module = deserialize_file(
-        // "wasm-test-bed/target/wasm32-unknown-unknown/release/wasm_test_bed.wasm",
+        // "wasm-test-bed/target/wasm32-unknown-unknown/release/wasm-test-bed.wasm",
         // "renderer/target/wasm32-unknown-unknown/release/rust-wasm-canvas.wasm",
-        "wasm/livesplit_core.wasm",
+        // "wasm/funky_karts.wasm",
+        "wasm/mono.wasm",
         // "wasmBoy/dist/wasm/index.untouched.wasm",
     ).unwrap();
     let module = module.parse_names().unwrap_or_else(|(_, m)| m);
-    // println!("{:#?}", &module.code_section().unwrap().bodies()[87 - module.import_count(ImportCountType::Function)]);
-    // println!("{:?}", module);
+    // println!(
+    //     "{:#?}",
+    //     &module.code_section().unwrap().bodies()
+    //         [65 - module.import_count(ImportCountType::Function)]
+    // );
+    // println!("{:#?}", module);
     // return;
 
     let import_count = module.import_count(ImportCountType::Function);
-    let code: &CodeSection = module.code_section().unwrap();
-    let fns: &FunctionSection = module.function_section().unwrap();
-    let types: &TypeSection = module.type_section().unwrap();
-    let exports: &ExportSection = module.export_section().unwrap();
+    let code = module.code_section().unwrap();
+    let fns = module.function_section().unwrap();
+    let types = module.type_section().unwrap();
+    let exports = module.export_section().unwrap();
     let function_names = module
         .sections()
         .iter()
@@ -79,7 +84,6 @@ fn main() {
     if let Some(imports) = module.import_section() {
         for import in imports.entries() {
             // TODO Handle modules
-            let import: &ImportEntry = import;
             if let &External::Function(type_index) = import.external() {
                 let typ: &Type = &types.types()[type_index as usize];
                 let fn_type = match *typ {
@@ -112,6 +116,76 @@ pub trait Imports {{"
         println!(";");
     }
 
+    struct Global {
+        is_mutable: bool,
+        is_pub: bool,
+        name: String,
+        ty: &'static str,
+        value: String,
+    }
+
+    let mut globals = Vec::new();
+
+    if let Some(imports) = module.import_section() {
+        for import in imports.entries() {
+            if let &External::Global(ty) = import.external() {
+                let name = import.field().to_string();
+                globals.push(Global {
+                    is_mutable: ty.is_mutable(),
+                    is_pub: true, // Doesn't really apply
+                    name,
+                    ty: to_rs_type(ty.content_type()),
+                    value: String::new(), // Doesn't really apply
+                });
+            }
+        }
+    }
+
+    let imported_globals_count = globals.len();
+
+    // TODO Handle imported globals correctly!
+
+    if let Some(global_section) = module.global_section() {
+        for entry in global_section.entries() {
+            let ty = entry.global_type();
+            let name = format!("global{}", globals.len());
+            let init_val = entry.init_expr().code();
+            assert!(init_val.len() == 2);
+            let value = match init_val[0] {
+                Opcode::I32Const(c) => c.to_string(),
+                Opcode::I64Const(c) => c.to_string(),
+                Opcode::F32Const(c) => c.to_string(),
+                Opcode::F64Const(c) => c.to_string(),
+                _ => String::new(),
+                // TODO !!!!!!!!!!!
+                // _ => panic!("Global variable with init expression mismatch"),
+            };
+            globals.push(Global {
+                is_mutable: ty.is_mutable(),
+                is_pub: false,
+                name,
+                ty: to_rs_type(ty.content_type()),
+                value,
+            });
+        }
+    }
+
+    for export in exports.entries() {
+        if let &Internal::Global(global_index) = export.internal() {
+            let global = &mut globals[global_index as usize];
+            global.name = export.field().to_string();
+            global.is_pub = true;
+        }
+    }
+
+    for global in &globals[..imported_globals_count] {
+        // if global.is_mutable {
+        println!("    fn {}(&mut self) -> &mut {};", global.name, global.ty);
+        // } else {
+        //     println!("    const {}: {};", global.name, global.ty);
+        // }
+    }
+
     println!(
         "{}",
         r#"}
@@ -138,48 +212,7 @@ pub struct Wasm<I: Imports, M: Memory> {
     pub mem: M,"#
     );
 
-    struct Global {
-        is_mutable: bool,
-        is_pub: bool,
-        name: String,
-        ty: &'static str,
-        value: String,
-    }
-
-    let mut globals = Vec::new();
-
-    if let Some(global_section) = module.global_section() {
-        for (i, entry) in global_section.entries().iter().enumerate() {
-            let ty = entry.global_type();
-            let name = format!("global{}", i);
-            let init_val = entry.init_expr().code();
-            assert!(init_val.len() == 2);
-            let value = match init_val[0] {
-                Opcode::I32Const(c) => c.to_string(),
-                Opcode::I64Const(c) => c.to_string(),
-                Opcode::F32Const(c) => c.to_string(),
-                Opcode::F64Const(c) => c.to_string(),
-                _ => panic!("Global variable with init expression mismatch"),
-            };
-            globals.push(Global {
-                is_mutable: ty.is_mutable(),
-                is_pub: false,
-                name,
-                ty: to_rs_type(ty.content_type()),
-                value,
-            });
-        }
-    }
-
-    for export in exports.entries() {
-        if let &Internal::Global(global_index) = export.internal() {
-            let global = &mut globals[global_index as usize];
-            global.name = export.field().to_string();
-            global.is_pub = true;
-        }
-    }
-
-    for global in &globals {
+    for global in &globals[imported_globals_count..] {
         if global.is_mutable {
             print!("    ");
             if global.is_pub {
@@ -227,7 +260,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
             mem,"#
     );
 
-    for global in &globals {
+    for global in &globals[imported_globals_count..] {
         if global.is_mutable {
             println!("            {}: {},", global.name, global.value);
         }
@@ -246,7 +279,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
     }"#
     );
 
-    for global in &globals {
+    for global in &globals[imported_globals_count..] {
         if !global.is_mutable {
             print!("    ");
             if global.is_pub {
@@ -257,7 +290,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
     }
 
     for export in exports.entries() {
-        let export: &ExportEntry = export;
         if let &Internal::Function(fn_index) = export.internal() {
             let (ref name, ref fn_type, ..) = functions[fn_index as usize];
             print!("    pub fn {}", export.field());
@@ -276,11 +308,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
     }
 
     for (i, (body, func)) in code.bodies().iter().zip(fns.entries()).enumerate() {
-        let body: &FuncBody = body;
-        let func: &Func = func;
-
         let type_index = func.type_ref();
-        let typ: &Type = &types.types()[type_index as usize];
+        let typ = &types.types()[type_index as usize];
         let fn_type = match *typ {
             Type::Function(ref t) => t,
         };
@@ -303,7 +332,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
             }
         }
 
-        // TODO Type Inference
         let mut expr_builder = ExprBuilder::new();
         let mut block_types = Vec::new();
         let mut indentation = Indentation(2);
@@ -319,7 +347,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
         ));
 
         for opcode in body.code().elements() {
-            // println!("{}// stack: {:?}", indentation, stack);
+            // println!("{}// stack: {:?}", indentation, expr_builder);
             use parity_wasm::elements::Opcode::*;
             match *opcode {
                 Unreachable => {
@@ -384,7 +412,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     let (is_loop, block_type) = block_types.pop().unwrap();
                     if is_loop.is_some() {
                         if let Some((precedence, target_var)) = block_type {
-                            // TODO Handle Result
                             if let Some((_, expr)) = expr_builder.pop() {
                                 println!("{}{} = {};", indentation, target_var, expr);
                                 expr_builder.push((precedence, target_var));
@@ -419,12 +446,17 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     println!("{}}}", indentation);
                 }
                 Br(relative_depth) => {
-                    let &(loop_info, _) = block_types
+                    let &(loop_info, ref block_type) = block_types
                         .iter()
                         .rev()
                         .nth(relative_depth as usize)
                         .unwrap();
                     let (label, is_a_loop) = loop_info.unwrap();
+
+                    if let &Some((_, ref target_var)) = block_type {
+                        let (_, expr) = expr_builder.pop().unwrap();
+                        println!("{}{} = {};", indentation, target_var, expr);
+                    }
 
                     println!(
                         "{}{} 'label{};",
@@ -442,6 +474,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         .unwrap();
                     let (label, is_a_loop) = loop_info.unwrap();
 
+                    // TODO Branch with value
+
                     println!("{}if {} != 0 {{", indentation, expr);
                     println!(
                         "{}    {} 'label{};",
@@ -453,6 +487,7 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 }
                 BrTable(ref table, default_depth) => {
                     let (_, expr) = expr_builder.pop().unwrap();
+                    // TODO Branch with value
                     println!("{}match {} {{", indentation, expr);
                     indentation.0 += 1;
                     for (index, &relative_depth) in table.iter().enumerate() {
@@ -548,8 +583,8 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     let (_, b) = expr_builder.pop().unwrap();
                     let (_, a) = expr_builder.pop().unwrap();
                     expr_builder.push((
-                        precedence::PATH,
-                        format!("(if {} != 0 {{ {} }} else {{ {} }})", c, a, b),
+                        precedence::MAX,
+                        format!("if {} != 0 {{ {} }} else {{ {} }}", c, a, b),
                     ));
                 }
                 GetLocal(i) => {
@@ -719,15 +754,22 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
-                //                 I64Load8S(_log_align, offset) => {
-                //                     let addr = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = self.mem.load8(var{} as usize + {}) as i8 as i64;",
-                //                         indentation, expr_index, addr, offset
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I64Load8S(_log_align, offset) => {
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    println!(
+                        "{}let var{} = self.mem.load8({} as usize{}) as i8 as i64;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
+                    );
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
+                    expr_index += 1;
+                }
                 I64Load8U(_log_align, offset) => {
                     let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
@@ -760,15 +802,22 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
-                //                 I64Load16U(_log_align, offset) => {
-                //                     let addr = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = self.mem.load16(var{} as usize + {}) as i64;",
-                //                         indentation, expr_index, addr, offset
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I64Load16U(_log_align, offset) => {
+                    let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
+                    println!(
+                        "{}let var{} = self.mem.load16({} as usize{}) as i64;",
+                        indentation,
+                        expr_index,
+                        addr,
+                        if offset != 0 {
+                            format!(" + {}", offset)
+                        } else {
+                            String::new()
+                        }
+                    );
+                    expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
+                    expr_index += 1;
+                }
                 I64Load32S(_log_align, offset) => {
                     let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                     println!(
@@ -936,11 +985,12 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         value
                     );
                 }
-                //                 CurrentMemory(_) => {
-                //                     println!("{}let var{} = self.mem.size();", indentation, expr_index);
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                CurrentMemory(_) => {
+                    let dst = format!("var{}", expr_index);
+                    println!("{}let {} = self.mem.size();", indentation, dst);
+                    expr_index += 1;
+                    expr_builder.push((precedence::PATH, dst));
+                }
                 GrowMemory(_) => {
                     let pages = expr_builder.pop_formatted(precedence::AS).unwrap();
                     let dst = format!("var{}", expr_index);
@@ -1221,15 +1271,11 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         format!("{}.trailing_zeros() as i32", a)
                     });
                 }
-                //                 I32Popcnt => {
-                //                     let a = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{}.count_ones() as i32;",
-                //                         indentation, expr_index, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I32Popcnt => {
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.count_ones() as i32", a)
+                    });
+                }
                 I32Add => {
                     expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
                         format!("{}.wrapping_add({})", a, b)
@@ -1301,16 +1347,14 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         |a, b| format!("{}.rotate_left({} as u32)", a, b),
                     );
                 }
-                //                 I32Rotr => {
-                //                     let a = stack.pop().unwrap();
-                //                     let b = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{}.rotate_right(var{} as u32);",
-                //                         indentation, expr_index, b, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I32Rotr => {
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.rotate_right({} as u32)", a, b),
+                    );
+                }
                 I64Clz => {
                     expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
                         format!("{}.leading_zeros() as i64", a)
@@ -1321,15 +1365,11 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         format!("{}.trailing_zeros() as i64", a)
                     });
                 }
-                //                 I64Popcnt => {
-                //                     let a = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{}.count_ones() as i64;",
-                //                         indentation, expr_index, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I64Popcnt => {
+                    expr_builder.unary_individual(precedence::METHOD_CALL, precedence::AS, |a| {
+                        format!("{}.count_ones() as i64", a)
+                    });
+                }
                 I64Add => {
                     expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
                         format!("{}.wrapping_add({})", a, b)
@@ -1353,16 +1393,11 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         format!("({} as u64 / {} as u64) as i64", a, b)
                     });
                 }
-                //                 I64RemS => {
-                //                     let a = stack.pop().unwrap();
-                //                     let b = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{}.wrapping_rem(var{});",
-                //                         indentation, expr_index, b, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I64RemS => {
+                    expr_builder.method_call_one_arg(precedence::METHOD_CALL, |a, b| {
+                        format!("{}.wrapping_rem({})", a, b)
+                    });
+                }
                 I64RemU => {
                     expr_builder.binary(precedence::AS, |a, b| {
                         format!("({} as u64).wrapping_rem({} as u64) as i64", a, b)
@@ -1385,16 +1420,6 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         |a, b| format!("{}.wrapping_shl({} as u32)", a, b),
                     );
                 }
-                //                 I64Shl => {
-                //                     let a = stack.pop().unwrap();
-                //                     let b = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{}.wrapping_shl(var{} as u32);",
-                //                         indentation, expr_index, b, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
                 I64ShrS => {
                     expr_builder.binary_individual(
                         precedence::METHOD_CALL,
@@ -1416,16 +1441,14 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         |a, b| format!("{}.rotate_left({} as u32)", a, b),
                     );
                 }
-                //                 I64Rotr => {
-                //                     let a = stack.pop().unwrap();
-                //                     let b = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{}.rotate_right(var{} as u32);",
-                //                         indentation, expr_index, b, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I64Rotr => {
+                    expr_builder.binary_individual(
+                        precedence::METHOD_CALL,
+                        precedence::AS,
+                        precedence::METHOD_CALL,
+                        |a, b| format!("{}.rotate_right({} as u32)", a, b),
+                    );
+                }
                 F32Abs => {
                     expr_builder.unary_individual(
                         precedence::METHOD_CALL,
@@ -1446,12 +1469,9 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32Floor => {
                     expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.floor()", a));
                 }
-                //                 F32Trunc => {
-                //                     let a = stack.pop().unwrap();
-                //                     println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                F32Trunc => {
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.trunc()", a));
+                }
                 F32Nearest => {
                     let (_, val) = expr_builder.pop().unwrap();
                     println!(
@@ -1473,12 +1493,9 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
                 }
-                //                 F32Sqrt => {
-                //                     let a = stack.pop().unwrap();
-                //                     println!("{}let var{} = var{}.sqrt();", indentation, expr_index, a);
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                F32Sqrt => {
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.sqrt()", a));
+                }
                 F32Add => {
                     expr_builder.binary_lr(precedence::ADD, |a, b| format!("{} + {}", a, b));
                 }
@@ -1495,20 +1512,18 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                     let (_, b) = expr_builder.pop().unwrap();
                     let (_, a) = expr_builder.pop().unwrap();
                     expr_builder.push((
-                        precedence::PATH,
-                        format!("({{ let a = {}; let b = {}; if a.is_nan() || b.is_nan() {{ a }} else {{ a.min(b) }} }})", a, b),
+                        precedence::MAX,
+                        format!("{{ let a = {}; let b = {}; if a.is_nan() || b.is_nan() {{ a }} else {{ a.min(b) }} }}", a, b),
                     ));
                 }
-                //                 F32Max => {
-                //                     let a = stack.pop().unwrap();
-                //                     let b = stack.pop().unwrap();
-                //                     println!(
-                //                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
-                //                         indentation, expr_index, b, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                F32Max => {
+                    let (_, b) = expr_builder.pop().unwrap();
+                    let (_, a) = expr_builder.pop().unwrap();
+                    expr_builder.push((
+                        precedence::MAX,
+                        format!("{{ let a = {}; let b = {}; if a.is_nan() || b.is_nan() {{ a }} else {{ a.max(b) }} }}", a, b),
+                    ));
+                }
                 F32Copysign => {
                     expr_builder.binary_individual(
                         precedence::METHOD_CALL,
@@ -1539,12 +1554,9 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Floor => {
                     expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.floor()", a));
                 }
-                //                 F64Trunc => {
-                //                     let a = stack.pop().unwrap();
-                //                     println!("{}let var{} = var{}.trunc();", indentation, expr_index, a);
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                F64Trunc => {
+                    expr_builder.unary(precedence::METHOD_CALL, |a| format!("{}.trunc()", a));
+                }
                 F64Nearest => {
                     let (_, val) = expr_builder.pop().unwrap();
                     println!(
@@ -1581,26 +1593,22 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F64Div => {
                     expr_builder.binary_lr(precedence::DIV, |a, b| format!("{} / {}", a, b));
                 }
-                //                 F64Min => {
-                //                     let a = stack.pop().unwrap();
-                //                     let b = stack.pop().unwrap();
-                //                     println!(
-                //                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.min(var{3}) }};",
-                //                         indentation, expr_index, b, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
-                //                 F64Max => {
-                //                     let a = stack.pop().unwrap();
-                //                     let b = stack.pop().unwrap();
-                //                     println!(
-                //                         "{0}let var{1} = if var{2}.is_nan() || var{3}.is_nan() {{ var{2} }} else {{ var{2}.max(var{3}) }};",
-                //                         indentation, expr_index, b, a
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                F64Min => {
+                    let (_, b) = expr_builder.pop().unwrap();
+                    let (_, a) = expr_builder.pop().unwrap();
+                    expr_builder.push((
+                        precedence::MAX,
+                        format!("{{ let a = {}; let b = {}; if a.is_nan() || b.is_nan() {{ a }} else {{ a.min(b) }} }}", a, b),
+                    ));
+                }
+                F64Max => {
+                    let (_, b) = expr_builder.pop().unwrap();
+                    let (_, a) = expr_builder.pop().unwrap();
+                    expr_builder.push((
+                        precedence::MAX,
+                        format!("{{ let a = {}; let b = {}; if a.is_nan() || b.is_nan() {{ a }} else {{ a.max(b) }} }}", a, b),
+                    ));
+                }
                 F64Copysign => {
                     expr_builder.binary_individual(
                         precedence::METHOD_CALL,
@@ -1617,15 +1625,9 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I32TruncSF32 => {
                     expr_builder.unary(precedence::AS, |a| format!("{} as i32", a));
                 }
-                //                 I32TruncUF32 => {
-                //                     let val = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{} as u32 as i32;",
-                //                         indentation, expr_index, val
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I32TruncUF32 => {
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u32 as i32", a));
+                }
                 I32TruncSF64 => {
                     expr_builder.unary(precedence::AS, |a| format!("{} as i32", a));
                 }
@@ -1638,12 +1640,9 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 I64ExtendUI32 => {
                     expr_builder.unary(precedence::AS, |a| format!("{} as u32 as i64", a));
                 }
-                //                 I64TruncSF32 => {
-                //                     let val = stack.pop().unwrap();
-                //                     println!("{}let var{} = var{} as i64;", indentation, expr_index, val);
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                I64TruncSF32 => {
+                    expr_builder.unary(precedence::AS, |a| format!("{} as i64", a));
+                }
                 I64TruncUF32 => {
                     expr_builder.unary(precedence::AS, |a| format!("{} as u64 as i64", a));
                 }
@@ -1656,15 +1655,9 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                 F32ConvertSI32 => {
                     expr_builder.unary(precedence::AS, |a| format!("{} as f32", a));
                 }
-                //                 F32ConvertUI32 => {
-                //                     let val = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = var{} as u32 as f32;",
-                //                         indentation, expr_index, val
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                F32ConvertUI32 => {
+                    expr_builder.unary(precedence::AS, |a| format!("{} as u32 as f32", a));
+                }
                 F32ConvertSI64 => {
                     expr_builder.unary(precedence::AS, |a| format!("{} as f32", a));
                 }
@@ -1699,25 +1692,15 @@ impl<I: Imports, M: Memory> Wasm<I, M> {
                         format!("{}.to_bits() as i64", a)
                     });
                 }
-                //                 F32ReinterpretI32 => {
-                //                     let val = stack.pop().unwrap();
-                //                     println!(
-                //                         "{}let var{} = f32::from_bits(var{} as u32);",
-                //                         indentation, expr_index, val
-                //                     );
-                //                     stack.push(expr_index);
-                //                     expr_index += 1;
-                //                 }
+                F32ReinterpretI32 => {
+                    expr_builder.unary_individual(precedence::AS, precedence::FUNCTION_CALL, |a| {
+                        format!("f32::from_bits({} as u32)", a)
+                    });
+                }
                 F64ReinterpretI64 => {
                     expr_builder.unary_individual(precedence::AS, precedence::FUNCTION_CALL, |a| {
                         format!("f64::from_bits({} as u64)", a)
                     });
-                }
-                ref e => {
-                    println!(
-                        "{}// Unhandled {:?} (Stack: {:?})",
-                        indentation, e, expr_builder
-                    );
                 }
             }
         }
