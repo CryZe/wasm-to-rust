@@ -49,20 +49,20 @@ fn to_rs_type(t: ValueType) -> &'static str {
     }
 }
 
-fn write_signature<W: Write>(writer: &mut W, fn_type: &FunctionType, mut_vars: bool) {
-    write!(writer, "(&mut self").unwrap();
-    for (i, &param) in fn_type.params().iter().enumerate() {
-        write!(writer, ",").unwrap();
-        if mut_vars {
-            write!(writer, " mut").unwrap();
-        }
-        write!(writer, " var{}: {}", i, to_rs_type(param)).unwrap();
-    }
-    write!(writer, ")").unwrap();
-    if let Some(ret_ty) = fn_type.return_type() {
-        write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
-    }
-}
+// fn write_signature<W: Write>(writer: &mut W, fn_type: &FunctionType, mut_vars: bool) {
+//     write!(writer, "(&mut self").unwrap();
+//     for (i, &param) in fn_type.params().iter().enumerate() {
+//         write!(writer, ",").unwrap();
+//         if mut_vars {
+//             write!(writer, " mut").unwrap();
+//         }
+//         write!(writer, " var{}: {}", i, to_rs_type(param)).unwrap();
+//     }
+//     write!(writer, ")").unwrap();
+//     if let Some(ret_ty) = fn_type.return_type() {
+//         write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
+//     }
+// }
 
 use std::fmt;
 
@@ -139,12 +139,23 @@ fn main() {
 
 pub const PAGE_SIZE: usize = 64 << 10;
 
-pub trait Environment {{"
+pub trait Imports {{
+    type Memory: Memory;"
     ).unwrap();
 
     for function in &functions[..import_count] {
-        write!(writer, "    fn {}", function.name).unwrap();
-        write_signature(&mut writer, function.ty, false);
+        write!(
+            writer,
+            "    fn {}(&mut self, context: &mut Context<Self::Memory>",
+            function.name
+        ).unwrap();
+        for (i, &param) in function.ty.params().iter().enumerate() {
+            write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
+        }
+        write!(writer, ")").unwrap();
+        if let Some(ret_ty) = function.ty.return_type() {
+            write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
+        }
         writeln!(writer, ";").unwrap();
     }
 
@@ -167,8 +178,6 @@ pub trait Environment {{"
     }
 
     let imported_globals_count = globals.len();
-
-    // TODO Handle imported globals correctly!
 
     if let Some(global_section) = module.global_section() {
         for entry in global_section.entries() {
@@ -206,7 +215,7 @@ pub trait Environment {{"
         // if global.is_mutable {
         writeln!(
             writer,
-            "    fn {}(&mut self) -> &mut {};",
+            "    fn {}(&mut self, context: &mut Context<Self::Memory>) -> &mut {};",
             global.name, global.ty
         ).unwrap();
         // } else {
@@ -217,7 +226,9 @@ pub trait Environment {{"
     writeln!(
         writer,
         "{}",
-        r#"
+        r#"}
+
+pub trait Memory {
     fn load8(&mut self, addr: usize) -> u8;
     fn load16(&mut self, addr: usize) -> u16;
     fn load32(&mut self, addr: usize) -> u32;
@@ -230,12 +241,17 @@ pub trait Environment {{"
 
     fn store_slice(&mut self, addr: usize, val: &[u8]);
 
-    fn mem_grow(&mut self, pages: usize) -> i32;
-    fn mem_size(&self) -> i32;
+    fn grow(&mut self, pages: usize) -> i32;
+    fn size(&mut self) -> i32;
 }
 
-pub struct Wasm<E: Environment> {
-    pub env: E,"#
+pub struct Instance<I: Imports<Memory = M>, M: Memory> {
+    pub imports: I,
+    pub context: Context<M>,
+}
+
+pub struct Context<M: Memory> {
+    pub memory: M,"#
     ).unwrap();
 
     for global in &globals[imported_globals_count..] {
@@ -248,22 +264,49 @@ pub struct Wasm<E: Environment> {
         }
     }
 
+    if globals[imported_globals_count..]
+        .iter()
+        .any(|g| !g.is_mutable)
+    {
+        writeln!(
+            writer,
+            "{}",
+            r#"}
+
+pub mod consts {"#
+        ).unwrap();
+
+        for global in &globals[imported_globals_count..] {
+            if !global.is_mutable {
+                write!(writer, "    ").unwrap();
+                if global.is_pub {
+                    write!(writer, "pub ").unwrap();
+                }
+                writeln!(
+                    writer,
+                    "const {}: {} = {};",
+                    global.name, global.ty, global.value
+                ).unwrap();
+            }
+        }
+    }
+
     writeln!(
         writer,
         "{}",
         r#"}
 
-impl<E: Environment> Wasm<E> {
-    pub fn new(mut env: E) -> Self {"#
+impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
+    pub fn new(imports: I, mut memory: M) -> Self {"#
     ).unwrap();
 
     if let Some(memory) = module.memory_section().and_then(|m| m.entries().first()) {
         writeln!(
             writer,
-            r#"        let current_pages = env.mem_size() as usize;
+            r#"        let current_pages = memory.size() as usize;
         if current_pages < {0} {{
-            env.mem_grow({0} - current_pages);
-            assert_eq!(env.mem_size(), {0}, "Not enough memory pages allocated");
+            memory.grow({0} - current_pages);
+            assert_eq!(memory.size(), {0}, "Not enough memory pages allocated");
         }}"#,
             memory.limits().initial()
         ).unwrap();
@@ -274,12 +317,21 @@ impl<E: Environment> Wasm<E> {
             let offset = entry.offset().code();
             assert!(offset.len() == 2);
             if let Opcode::I32Const(c) = offset[0] {
-                writeln!(
-                    writer,
-                    "        env.store_slice({}, &{:?});",
-                    c,
-                    entry.value()
-                ).unwrap();
+                write!(writer, r#"        memory.store_slice({}, b""#, c,).unwrap();
+                for &b in entry.value() {
+                    match b {
+                        b'"' => write!(writer, r#"\""#).unwrap(),
+                        b'\\' => write!(writer, r#"\\"#).unwrap(),
+                        b'\r' => write!(writer, r#"\r"#).unwrap(),
+                        b'\n' => write!(writer, r#"\n"#).unwrap(),
+                        b'\t' => write!(writer, r#"\t"#).unwrap(),
+                        0x00...0x7F => {
+                            write!(writer, "{}", std::char::from_u32(b as _).unwrap()).unwrap()
+                        }
+                        _ => write!(writer, r#"\x{:X}"#, b).unwrap(),
+                    }
+                }
+                writeln!(writer, r#"");"#,).unwrap();
             } else {
                 panic!("Data Segment with init expression mismatch");
             }
@@ -289,54 +341,90 @@ impl<E: Environment> Wasm<E> {
     writeln!(
         writer,
         "{}",
-        r#"        let mut wasm = Self {
-            env,"#
+        r#"        let mut instance = Self {
+            imports,
+            context: Context {
+                memory,"#
     ).unwrap();
 
     for global in &globals[imported_globals_count..] {
         if global.is_mutable {
-            writeln!(writer, "            {}: {},", global.name, global.value).unwrap();
+            writeln!(writer, "                {}: {},", global.name, global.value).unwrap();
         }
     }
 
-    writeln!(writer, "{}", r#"        };"#).unwrap();
+    writeln!(
+        writer,
+        "{}",
+        r#"            },
+        };"#
+    ).unwrap();
 
     let has_globals_init_code = globals[imported_globals_count..]
         .iter()
         .any(|g| g.init_code.is_some());
 
     if has_globals_init_code {
-        writeln!(writer, "        wasm.init_global_values();").unwrap();
+        writeln!(
+            writer,
+            "        instance.context.init_global_values(&mut instance.imports);"
+        ).unwrap();
     }
 
     if let Some(start) = module.start_section() {
         let name = &functions[start as usize].name;
-        writeln!(writer, "        wasm.{}();", name).unwrap();
+        writeln!(
+            writer,
+            "        instance.context.{}(&mut instance.imports);",
+            name
+        ).unwrap();
     }
 
     writeln!(
         writer,
         "{}",
-        r#"        wasm
+        r#"        instance
     }"#
     ).unwrap();
 
-    for global in &globals[imported_globals_count..] {
-        if !global.is_mutable {
-            write!(writer, "    ").unwrap();
-            if global.is_pub {
-                write!(writer, "pub ").unwrap();
+    for export in exports.entries() {
+        if let &Internal::Function(fn_index) = export.internal() {
+            let function = &functions[fn_index as usize];
+            write!(writer, "    pub fn {}(&mut self", export.field()).unwrap();
+            for (i, &param) in function.ty.params().iter().enumerate() {
+                write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
             }
-            writeln!(
+            write!(writer, ")").unwrap();
+            if let Some(ret_ty) = function.ty.return_type() {
+                write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
+            }
+            writeln!(writer, " {{").unwrap();
+            write!(
                 writer,
-                "const {}: {} = {};",
-                global.name, global.ty, global.value
+                "        self.context.{}(&mut self.imports",
+                function.name
             ).unwrap();
+            for (i, _) in function.ty.params().iter().enumerate() {
+                write!(writer, ", var{}", i).unwrap();
+            }
+            writeln!(writer, ")").unwrap();
+            writeln!(writer, "    }}").unwrap();
         }
     }
 
+    writeln!(
+        writer,
+        "{}",
+        r#"}
+
+impl<M: Memory> Context<M> {"#
+    ).unwrap();
+
     if has_globals_init_code {
-        writeln!(writer, "    fn init_global_values(&mut self) {{").unwrap();
+        writeln!(
+            writer,
+            "    fn init_global_values<I: Imports<Memory = M>>(&mut self, imports: &mut I) {{"
+        ).unwrap();
         for global in &globals[imported_globals_count..] {
             if let Some(ref init_code) = global.init_code {
                 writeln!(writer, "        self.{} = {{", global.name).unwrap();
@@ -361,15 +449,22 @@ impl<E: Environment> Wasm<E> {
     for export in exports.entries() {
         if let &Internal::Function(fn_index) = export.internal() {
             let function = &functions[fn_index as usize];
-            write!(writer, "    pub fn {}", export.field()).unwrap();
-            write_signature(&mut writer, function.ty, false);
+            write!(
+                writer,
+                "    pub fn {}<I: Imports<Memory = M>>(&mut self, imports: &mut I",
+                export.field()
+            ).unwrap();
+            for (i, &param) in function.ty.params().iter().enumerate() {
+                write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
+            }
+            write!(writer, ")").unwrap();
+            if let Some(ret_ty) = function.ty.return_type() {
+                write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
+            }
             writeln!(writer, " {{").unwrap();
-            write!(writer, "        self.{}(", function.name).unwrap();
+            write!(writer, "        self.{}(imports", function.name).unwrap();
             for (i, _) in function.ty.params().iter().enumerate() {
-                if i != 0 {
-                    write!(writer, ", ").unwrap();
-                }
-                write!(writer, "var{}", i).unwrap();
+                write!(writer, ", var{}", i).unwrap();
             }
             writeln!(writer, ")").unwrap();
             writeln!(writer, "    }}").unwrap();
@@ -387,8 +482,18 @@ impl<E: Environment> Wasm<E> {
         if let Some(real_name) = functions[fn_index].real_name {
             writeln!(writer, "    // {}", real_name).unwrap();
         }
-        write!(writer, "    fn func{}", fn_index).unwrap();
-        write_signature(&mut writer, fn_type, true);
+        write!(
+            writer,
+            "    fn func{}<I: Imports<Memory = M>>(&mut self, imports: &mut I",
+            fn_index
+        ).unwrap();
+        for (i, &param) in fn_type.params().iter().enumerate() {
+            write!(writer, ", mut var{}: {}", i, to_rs_type(param)).unwrap();
+        }
+        write!(writer, ")").unwrap();
+        if let Some(ret_ty) = fn_type.return_type() {
+            write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
+        }
         writeln!(writer, " {{").unwrap();
 
         let mut expr_index = fn_type.params().len();
@@ -434,8 +539,8 @@ impl<E: Environment> Wasm<E> {
 
         for (type_index, fns) in indirect_fns {
             let Type::Function(ref fn_type) = types.types()[type_index as usize];
-            write!(writer, "    fn call_indirect{}", type_index).unwrap();
-            write!(writer, "(&mut self, ptr: i32").unwrap();
+            write!(writer, "    fn call_indirect{}<I: Imports>", type_index).unwrap();
+            write!(writer, "(&mut self, imports: &mut I, ptr: i32").unwrap();
             for (i, &param) in fn_type.params().iter().enumerate() {
                 write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
             }
@@ -451,17 +556,20 @@ impl<E: Environment> Wasm<E> {
             for (fn_ptr, fn_index) in fns {
                 let function = &functions[fn_index as usize];
                 write!(writer, "            {} => ", fn_ptr).unwrap();
-                if (fn_index as usize) < import_count {
-                    write!(writer, "self.env.").unwrap();
+                let is_imported = (fn_index as usize) < import_count;
+                if is_imported {
+                    write!(writer, "imports.").unwrap();
                 } else {
                     write!(writer, "self.").unwrap();
                 }
                 write!(writer, "{}(", function.name).unwrap();
+                if is_imported {
+                    write!(writer, "self").unwrap();
+                } else {
+                    write!(writer, "imports").unwrap();
+                }
                 for i in 0..function.ty.params().len() {
-                    if i != 0 {
-                        write!(writer, ", ").unwrap();
-                    }
-                    write!(writer, "var{}", i).unwrap();
+                    write!(writer, ", var{}", i).unwrap();
                 }
                 if let Some(real_name) = function.real_name {
                     writeln!(writer, "), // {}", real_name).unwrap();

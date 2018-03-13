@@ -238,18 +238,21 @@ pub fn build<W: Write>(
                 if fn_type.return_type().is_some() {
                     write!(writer, "let var{} = ", expr_index).unwrap();
                 }
-                if (fn_index as usize) < import_count {
-                    write!(writer, "self.env.").unwrap();
+                let is_imported = (fn_index as usize) < import_count;
+                if is_imported {
+                    write!(writer, "imports.").unwrap();
                 } else {
                     write!(writer, "self.").unwrap();
                 }
                 write!(writer, "{}(", name).unwrap();
+                if is_imported {
+                    write!(writer, "self").unwrap();
+                } else {
+                    write!(writer, "imports").unwrap();
+                }
                 let index = expr_builder.len() - fn_type.params().len();
-                for (i, (_, expr)) in expr_builder.inner().drain(index..).enumerate() {
-                    if i != 0 {
-                        write!(writer, ", ").unwrap();
-                    }
-                    write!(writer, "{}", expr).unwrap();
+                for (_, expr) in expr_builder.inner().drain(index..) {
+                    write!(writer, ", {}", expr).unwrap();
                 }
                 if let Some(real_name) = real_name {
                     writeln!(writer, "); // {}", real_name).unwrap();
@@ -268,7 +271,11 @@ pub fn build<W: Write>(
                     write!(writer, "let var{} = ", expr_index).unwrap();
                 }
                 let (_, fn_ptr) = expr_builder.pop().unwrap();
-                write!(writer, "self.call_indirect{}({}", type_index, fn_ptr).unwrap();
+                write!(
+                    writer,
+                    "self.call_indirect{}(imports, {}",
+                    type_index, fn_ptr
+                ).unwrap();
                 let index = expr_builder.len() - fn_type.params().len();
                 for (_, expr) in expr_builder.inner().drain(index..) {
                     write!(writer, ", {}", expr).unwrap();
@@ -317,7 +324,11 @@ pub fn build<W: Write>(
                 let name = &global.name;
                 if (i as usize) < imported_globals_count {
                     let dst = format!("var{}", expr_index);
-                    writeln!(writer, "{}let {} = *self.env.{}();", indentation, dst, name).unwrap();
+                    writeln!(
+                        writer,
+                        "{}let {} = *imports.{}(self);",
+                        indentation, dst, name
+                    ).unwrap();
                     expr_index += 1;
                     expr_builder.push((precedence::PATH, dst));
                 } else if global.is_mutable {
@@ -326,7 +337,7 @@ pub fn build<W: Write>(
                     expr_index += 1;
                     expr_builder.push((precedence::PATH, dst));
                 } else {
-                    expr_builder.push((precedence::PATH, format!("Self::{}", name)));
+                    expr_builder.push((precedence::PATH, format!("consts::{}", name)));
                 }
             }
             SetGlobal(i) => {
@@ -335,7 +346,7 @@ pub fn build<W: Write>(
                 let name = &global.name;
                 assert!(global.is_mutable);
                 if (i as usize) < imported_globals_count {
-                    writeln!(writer, "{}*self.env.{}() = {};", indentation, name, expr).unwrap();
+                    writeln!(writer, "{}*imports.{}(self) = {};", indentation, name, expr).unwrap();
                 } else {
                     writeln!(writer, "{}self.{} = {};", indentation, name, expr).unwrap();
                 }
@@ -344,7 +355,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load32({} as usize{}) as i32;",
+                    "{}let var{} = self.memory.load32({} as usize{}) as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -361,7 +372,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load64({} as usize{}) as i64;",
+                    "{}let var{} = self.memory.load64({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -378,7 +389,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = f32::from_bits(self.env.load32({} as usize{}));",
+                    "{}let var{} = f32::from_bits(self.memory.load32({} as usize{}));",
                     indentation,
                     expr_index,
                     addr,
@@ -395,7 +406,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = f64::from_bits(self.env.load64({} as usize{}));",
+                    "{}let var{} = f64::from_bits(self.memory.load64({} as usize{}));",
                     indentation,
                     expr_index,
                     addr,
@@ -412,7 +423,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load8({} as usize{}) as i8 as i32;",
+                    "{}let var{} = self.memory.load8({} as usize{}) as i8 as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -429,7 +440,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load8({} as usize{}) as i32;",
+                    "{}let var{} = self.memory.load8({} as usize{}) as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -446,7 +457,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load16({} as usize{}) as i16 as i32;",
+                    "{}let var{} = self.memory.load16({} as usize{}) as i16 as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -463,7 +474,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load16({} as usize{}) as i32;",
+                    "{}let var{} = self.memory.load16({} as usize{}) as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -480,7 +491,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load8({} as usize{}) as i8 as i64;",
+                    "{}let var{} = self.memory.load8({} as usize{}) as i8 as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -497,7 +508,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load8({} as usize{}) as i64;",
+                    "{}let var{} = self.memory.load8({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -514,7 +525,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load16({} as usize{}) as i16 as i64;",
+                    "{}let var{} = self.memory.load16({} as usize{}) as i16 as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -531,7 +542,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load16({} as usize{}) as i64;",
+                    "{}let var{} = self.memory.load16({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -548,7 +559,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load32({} as usize{}) as i32 as i64;",
+                    "{}let var{} = self.memory.load32({} as usize{}) as i32 as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -565,7 +576,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}let var{} = self.env.load32({} as usize{}) as i64;",
+                    "{}let var{} = self.memory.load32({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -583,7 +594,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store32({} as usize{}, {} as u32);",
+                    "{}self.memory.store32({} as usize{}, {} as u32);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -599,7 +610,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store64({} as usize{}, {} as u64);",
+                    "{}self.memory.store64({} as usize{}, {} as u64);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -615,7 +626,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store32({} as usize{}, {}.to_bits());",
+                    "{}self.memory.store32({} as usize{}, {}.to_bits());",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -631,7 +642,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store64({} as usize{}, {}.to_bits());",
+                    "{}self.memory.store64({} as usize{}, {}.to_bits());",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -647,7 +658,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store8({} as usize{}, {} as u8);",
+                    "{}self.memory.store8({} as usize{}, {} as u8);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -663,7 +674,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store16({} as usize{}, {} as u16);",
+                    "{}self.memory.store16({} as usize{}, {} as u16);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -679,7 +690,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store8({} as usize{}, {} as u8);",
+                    "{}self.memory.store8({} as usize{}, {} as u8);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -695,7 +706,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store16({} as usize{}, {} as u16);",
+                    "{}self.memory.store16({} as usize{}, {} as u16);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -711,7 +722,7 @@ pub fn build<W: Write>(
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
                 writeln!(
                     writer,
-                    "{}self.env.store32({} as usize{}, {} as u32);",
+                    "{}self.memory.store32({} as usize{}, {} as u32);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -724,7 +735,7 @@ pub fn build<W: Write>(
             }
             CurrentMemory(_) => {
                 let dst = format!("var{}", expr_index);
-                writeln!(writer, "{}let {} = self.env.env_size();", indentation, dst).unwrap();
+                writeln!(writer, "{}let {} = self.memory.size();", indentation, dst).unwrap();
                 expr_index += 1;
                 expr_builder.push((precedence::PATH, dst));
             }
@@ -733,7 +744,7 @@ pub fn build<W: Write>(
                 let dst = format!("var{}", expr_index);
                 writeln!(
                     writer,
-                    "{}let {} = self.env.env_grow({} as usize);",
+                    "{}let {} = self.memory.grow({} as usize);",
                     indentation, dst, pages
                 ).unwrap();
                 expr_builder.push((precedence::PATH, dst));
