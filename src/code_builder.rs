@@ -1,8 +1,10 @@
 use parity_wasm::elements::{BlockType, Opcode, Type, TypeSection};
 use expr_builder::ExprBuilder;
 use {precedence, to_rs_type, Function, Global, Indentation};
+use std::io::Write;
 
-pub fn build(
+pub fn build<W: Write>(
+    writer: &mut W,
     mut expr_index: usize,
     evaluates_to_value: bool,
     import_count: usize,
@@ -28,11 +30,11 @@ pub fn build(
     ));
 
     for opcode in code {
-        // println!("{}// stack: {:?}", indentation, expr_builder);
+        // writeln!(writer, "{}// stack: {:?}", indentation, expr_builder);
         use parity_wasm::elements::Opcode::*;
         match *opcode {
             Unreachable => {
-                println!("{}unreachable!();", indentation);
+                writeln!(writer, "{}unreachable!();", indentation).unwrap();
             }
             Nop => {
                 assert!(expr_builder.is_empty());
@@ -40,13 +42,19 @@ pub fn build(
             Block(block_type) => {
                 let block_type = if let BlockType::Value(ty) = block_type {
                     let var_name = format!("var{}", expr_index);
-                    println!("{}let {}: {};", indentation, var_name, to_rs_type(ty));
+                    writeln!(
+                        writer,
+                        "{}let {}: {};",
+                        indentation,
+                        var_name,
+                        to_rs_type(ty)
+                    ).unwrap();
                     expr_index += 1;
                     Some((precedence::PATH, var_name))
                 } else {
                     None
                 };
-                println!("{}'label{}: loop {{", indentation, loop_count);
+                writeln!(writer, "{}'label{}: loop {{", indentation, loop_count).unwrap();
                 loop_count += 1;
                 indentation.0 += 1;
                 block_types.push((Some((loop_count - 1, false)), block_type));
@@ -54,13 +62,13 @@ pub fn build(
             Loop(block_type) => {
                 let block_type = if let BlockType::Value(ty) = block_type {
                     let dst = format!("var{}", expr_index);
-                    println!("{}let {}: {};", indentation, dst, to_rs_type(ty));
+                    writeln!(writer, "{}let {}: {};", indentation, dst, to_rs_type(ty)).unwrap();
                     expr_index += 1;
                     Some((precedence::PATH, dst))
                 } else {
                     None
                 };
-                println!("{}'label{}: loop {{", indentation, loop_count);
+                writeln!(writer, "{}'label{}: loop {{", indentation, loop_count).unwrap();
                 loop_count += 1;
                 indentation.0 += 1;
                 block_types.push((Some((loop_count - 1, true)), block_type));
@@ -69,13 +77,13 @@ pub fn build(
                 let expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
                 let block_type = if let BlockType::Value(ty) = block_type {
                     let dst = format!("var{}", expr_index);
-                    println!("{}let {}: {};", indentation, dst, to_rs_type(ty));
+                    writeln!(writer, "{}let {}: {};", indentation, dst, to_rs_type(ty)).unwrap();
                     expr_index += 1;
                     Some((precedence::PATH, dst))
                 } else {
                     None
                 };
-                println!("{}if {} != 0 {{", indentation, expr);
+                writeln!(writer, "{}if {} != 0 {{", indentation, expr).unwrap();
                 indentation.0 += 1;
                 block_types.push((None, block_type));
             }
@@ -83,10 +91,10 @@ pub fn build(
                 let &(_, ref block_type) = block_types.last().unwrap();
                 if let &Some((_, ref target_var)) = block_type {
                     let (_, expr) = expr_builder.pop().unwrap();
-                    println!("{}{} = {};", indentation, target_var, expr);
+                    writeln!(writer, "{}{} = {};", indentation, target_var, expr).unwrap();
                 }
                 indentation.0 -= 1;
-                println!("{}}} else {{", indentation);
+                writeln!(writer, "{}}} else {{", indentation).unwrap();
                 indentation.0 += 1;
             }
             End => {
@@ -94,39 +102,41 @@ pub fn build(
                 if is_loop.is_some() {
                     if let Some((precedence, target_var)) = block_type {
                         if let Some((_, expr)) = expr_builder.pop() {
-                            println!("{}{} = {};", indentation, target_var, expr);
+                            writeln!(writer, "{}{} = {};", indentation, target_var, expr).unwrap();
                             expr_builder.push((precedence, target_var));
-                            println!("{}break;", indentation);
+                            writeln!(writer, "{}break;", indentation).unwrap();
                         } else {
-                            println!("{}// There should've been a loop expression value here, but this may be unreachable", indentation);
-                            println!("{}unreachable!()", indentation);
+                            writeln!(writer, "{}// There should've been a loop expression value here, but this may be unreachable", indentation).unwrap();
+                            writeln!(writer, "{}unreachable!()", indentation).unwrap();
                         }
                     } else {
-                        println!("{}break;", indentation);
+                        writeln!(writer, "{}break;", indentation).unwrap();
                     }
                 } else {
                     if !block_types.is_empty() {
                         if let Some((precedence, target_var)) = block_type {
                             if let Some((_, expr)) = expr_builder.pop() {
-                                println!("{}{} = {};", indentation, target_var, expr);
+                                writeln!(writer, "{}{} = {};", indentation, target_var, expr)
+                                    .unwrap();
                                 expr_builder.push((precedence, target_var));
                             } else {
-                                println!("{}// This seems to be unreachable", indentation);
-                                println!("{}unreachable!()", indentation);
+                                writeln!(writer, "{}// This seems to be unreachable", indentation)
+                                    .unwrap();
+                                writeln!(writer, "{}unreachable!()", indentation).unwrap();
                             }
                         }
                     }
                 }
                 if block_types.is_empty() {
                     if let Some((_, expr)) = expr_builder.pop() {
-                        println!("{}{}", indentation, expr);
+                        writeln!(writer, "{}{}", indentation, expr).unwrap();
                     }
                     assert!(expr_builder.is_empty());
                     indentation.0 -= 1;
-                    print!("{}}}", indentation);
+                    write!(writer, "{}}}", indentation).unwrap();
                 } else {
                     indentation.0 -= 1;
-                    println!("{}}}", indentation);
+                    writeln!(writer, "{}}}", indentation).unwrap();
                 }
             }
             Br(relative_depth) => {
@@ -139,15 +149,16 @@ pub fn build(
 
                 if let &Some((_, ref target_var)) = block_type {
                     let (_, expr) = expr_builder.pop().unwrap();
-                    println!("{}{} = {};", indentation, target_var, expr);
+                    writeln!(writer, "{}{} = {};", indentation, target_var, expr).unwrap();
                 }
 
-                println!(
+                writeln!(
+                    writer,
                     "{}{} 'label{};",
                     indentation,
                     if is_a_loop { "continue" } else { "break" },
                     label
-                );
+                ).unwrap();
             }
             BrIf(relative_depth) => {
                 let expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
@@ -158,25 +169,26 @@ pub fn build(
                     .unwrap();
                 let (label, is_a_loop) = loop_info.unwrap();
 
-                println!("{}if {} != 0 {{", indentation, expr);
+                writeln!(writer, "{}if {} != 0 {{", indentation, expr).unwrap();
 
                 if let &Some((_, ref target_var)) = block_type {
                     let &(_, ref expr) = expr_builder.inner().last().unwrap();
-                    println!("{}    {} = {};", indentation, target_var, expr);
+                    writeln!(writer, "{}    {} = {};", indentation, target_var, expr).unwrap();
                 }
 
-                println!(
+                writeln!(
+                    writer,
                     "{}    {} 'label{};",
                     indentation,
                     if is_a_loop { "continue" } else { "break" },
                     label
-                );
-                println!("{}}}", indentation);
+                ).unwrap();
+                writeln!(writer, "{}}}", indentation).unwrap();
             }
             BrTable(ref table, default_depth) => {
                 let (_, expr) = expr_builder.pop().unwrap();
                 // TODO Branch with value
-                println!("{}match {} {{", indentation, expr);
+                writeln!(writer, "{}match {} {{", indentation, expr).unwrap();
                 indentation.0 += 1;
                 for (index, &relative_depth) in table.iter().enumerate() {
                     let &(loop_info, _) = block_types
@@ -185,13 +197,14 @@ pub fn build(
                         .nth(relative_depth as usize)
                         .unwrap();
                     let (label, is_a_loop) = loop_info.unwrap();
-                    println!(
+                    writeln!(
+                        writer,
                         "{}{} => {} 'label{},",
                         indentation,
                         index,
                         if is_a_loop { "continue" } else { "break" },
                         label
-                    );
+                    ).unwrap();
                 }
                 let &(loop_info, _) = block_types
                     .iter()
@@ -199,20 +212,21 @@ pub fn build(
                     .nth(default_depth as usize)
                     .unwrap();
                 let (label, is_a_loop) = loop_info.unwrap();
-                println!(
+                writeln!(
+                    writer,
                     "{}_ => {} 'label{},",
                     indentation,
                     if is_a_loop { "continue" } else { "break" },
                     label
-                );
+                ).unwrap();
                 indentation.0 -= 1;
-                println!("{}}}", indentation);
+                writeln!(writer, "{}}}", indentation).unwrap();
             }
             Return => {
                 if let Some((_, expr)) = expr_builder.pop() {
-                    println!("{}return {};", indentation, expr);
+                    writeln!(writer, "{}return {};", indentation, expr).unwrap();
                 } else {
-                    println!("{}return;", indentation);
+                    writeln!(writer, "{}return;", indentation).unwrap();
                 }
             }
             Call(fn_index) => {
@@ -220,27 +234,27 @@ pub fn build(
                 let name = &function.name;
                 let fn_type = function.ty;
                 let real_name = function.real_name;
-                print!("{}", indentation);
+                write!(writer, "{}", indentation).unwrap();
                 if fn_type.return_type().is_some() {
-                    print!("let var{} = ", expr_index);
+                    write!(writer, "let var{} = ", expr_index).unwrap();
                 }
                 if (fn_index as usize) < import_count {
-                    print!("self.imports.");
+                    write!(writer, "self.env.").unwrap();
                 } else {
-                    print!("self.");
+                    write!(writer, "self.").unwrap();
                 }
-                print!("{}(", name);
+                write!(writer, "{}(", name).unwrap();
                 let index = expr_builder.len() - fn_type.params().len();
                 for (i, (_, expr)) in expr_builder.inner().drain(index..).enumerate() {
                     if i != 0 {
-                        print!(", ");
+                        write!(writer, ", ").unwrap();
                     }
-                    print!("{}", expr);
+                    write!(writer, "{}", expr).unwrap();
                 }
                 if let Some(real_name) = real_name {
-                    println!("); // {}", real_name);
+                    writeln!(writer, "); // {}", real_name).unwrap();
                 } else {
-                    println!(");");
+                    writeln!(writer, ");").unwrap();
                 }
                 if fn_type.return_type().is_some() {
                     expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
@@ -249,17 +263,17 @@ pub fn build(
             }
             CallIndirect(type_index, _) => {
                 let Type::Function(ref fn_type) = types.types()[type_index as usize];
-                print!("{}", indentation);
+                write!(writer, "{}", indentation).unwrap();
                 if fn_type.return_type().is_some() {
-                    print!("let var{} = ", expr_index);
+                    write!(writer, "let var{} = ", expr_index).unwrap();
                 }
                 let (_, fn_ptr) = expr_builder.pop().unwrap();
-                print!("self.call_indirect{}({}", type_index, fn_ptr);
+                write!(writer, "self.call_indirect{}({}", type_index, fn_ptr).unwrap();
                 let index = expr_builder.len() - fn_type.params().len();
                 for (_, expr) in expr_builder.inner().drain(index..) {
-                    print!(", {}", expr);
+                    write!(writer, ", {}", expr).unwrap();
                 }
-                println!(");");
+                writeln!(writer, ");").unwrap();
                 if fn_type.return_type().is_some() {
                     expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                     expr_index += 1;
@@ -282,19 +296,19 @@ pub fn build(
                 // Can't be inline in an expression since it may be
                 // overwritten until it's used.
                 let dst = format!("var{}", expr_index);
-                println!("{}let {} = var{};", indentation, dst, i);
+                writeln!(writer, "{}let {} = var{};", indentation, dst, i).unwrap();
                 expr_index += 1;
                 expr_builder.push((precedence::PATH, dst));
             }
             SetLocal(i) => {
                 let (_, expr) = expr_builder.pop().unwrap();
-                println!("{}var{} = {};", indentation, i, expr);
+                writeln!(writer, "{}var{} = {};", indentation, i, expr).unwrap();
             }
             TeeLocal(i) => {
                 let (_, expr) = expr_builder.pop().unwrap();
-                println!("{}var{} = {};", indentation, i, expr);
+                writeln!(writer, "{}var{} = {};", indentation, i, expr).unwrap();
                 let dst = format!("var{}", expr_index);
-                println!("{}let {} = var{};", indentation, dst, i);
+                writeln!(writer, "{}let {} = var{};", indentation, dst, i).unwrap();
                 expr_index += 1;
                 expr_builder.push((precedence::PATH, dst));
             }
@@ -303,12 +317,12 @@ pub fn build(
                 let name = &global.name;
                 if (i as usize) < imported_globals_count {
                     let dst = format!("var{}", expr_index);
-                    println!("{}let {} = *self.imports.{}();", indentation, dst, name);
+                    writeln!(writer, "{}let {} = *self.env.{}();", indentation, dst, name).unwrap();
                     expr_index += 1;
                     expr_builder.push((precedence::PATH, dst));
                 } else if global.is_mutable {
                     let dst = format!("var{}", expr_index);
-                    println!("{}let {} = self.{};", indentation, dst, name);
+                    writeln!(writer, "{}let {} = self.{};", indentation, dst, name).unwrap();
                     expr_index += 1;
                     expr_builder.push((precedence::PATH, dst));
                 } else {
@@ -321,15 +335,16 @@ pub fn build(
                 let name = &global.name;
                 assert!(global.is_mutable);
                 if (i as usize) < imported_globals_count {
-                    println!("{}*self.imports.{}() = {};", indentation, name, expr);
+                    writeln!(writer, "{}*self.env.{}() = {};", indentation, name, expr).unwrap();
                 } else {
-                    println!("{}self.{} = {};", indentation, name, expr);
+                    writeln!(writer, "{}self.{} = {};", indentation, name, expr).unwrap();
                 }
             }
             I32Load(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load32({} as usize{}) as i32;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load32({} as usize{}) as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -338,14 +353,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I64Load(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load64({} as usize{}) as i64;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load64({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -354,14 +370,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             F32Load(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = f32::from_bits(self.mem.load32({} as usize{}));",
+                writeln!(
+                    writer,
+                    "{}let var{} = f32::from_bits(self.env.load32({} as usize{}));",
                     indentation,
                     expr_index,
                     addr,
@@ -370,14 +387,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             F64Load(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = f64::from_bits(self.mem.load64({} as usize{}));",
+                writeln!(
+                    writer,
+                    "{}let var{} = f64::from_bits(self.env.load64({} as usize{}));",
                     indentation,
                     expr_index,
                     addr,
@@ -386,14 +404,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I32Load8S(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load8({} as usize{}) as i8 as i32;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load8({} as usize{}) as i8 as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -402,14 +421,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I32Load8U(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load8({} as usize{}) as i32;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load8({} as usize{}) as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -418,14 +438,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I32Load16S(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load16({} as usize{}) as i16 as i32;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load16({} as usize{}) as i16 as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -434,14 +455,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I32Load16U(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load16({} as usize{}) as i32;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load16({} as usize{}) as i32;",
                     indentation,
                     expr_index,
                     addr,
@@ -450,14 +472,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I64Load8S(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load8({} as usize{}) as i8 as i64;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load8({} as usize{}) as i8 as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -466,14 +489,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I64Load8U(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load8({} as usize{}) as i64;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load8({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -482,14 +506,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I64Load16S(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load16({} as usize{}) as i16 as i64;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load16({} as usize{}) as i16 as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -498,14 +523,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I64Load16U(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load16({} as usize{}) as i64;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load16({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -514,14 +540,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I64Load32S(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load32({} as usize{}) as i32 as i64;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load32({} as usize{}) as i32 as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -530,14 +557,15 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I64Load32U(_log_align, offset) => {
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}let var{} = self.mem.load32({} as usize{}) as i64;",
+                writeln!(
+                    writer,
+                    "{}let var{} = self.env.load32({} as usize{}) as i64;",
                     indentation,
                     expr_index,
                     addr,
@@ -546,15 +574,16 @@ pub fn build(
                     } else {
                         String::new()
                     }
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
             I32Store(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store32({} as usize{}, {} as u32);",
+                writeln!(
+                    writer,
+                    "{}self.env.store32({} as usize{}, {} as u32);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -563,13 +592,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             I64Store(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store64({} as usize{}, {} as u64);",
+                writeln!(
+                    writer,
+                    "{}self.env.store64({} as usize{}, {} as u64);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -578,13 +608,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             F32Store(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::METHOD_CALL).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store32({} as usize{}, {}.to_bits());",
+                writeln!(
+                    writer,
+                    "{}self.env.store32({} as usize{}, {}.to_bits());",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -593,13 +624,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             F64Store(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::METHOD_CALL).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store64({} as usize{}, {}.to_bits());",
+                writeln!(
+                    writer,
+                    "{}self.env.store64({} as usize{}, {}.to_bits());",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -608,13 +640,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             I32Store8(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store8({} as usize{}, {} as u8);",
+                writeln!(
+                    writer,
+                    "{}self.env.store8({} as usize{}, {} as u8);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -623,13 +656,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             I32Store16(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store16({} as usize{}, {} as u16);",
+                writeln!(
+                    writer,
+                    "{}self.env.store16({} as usize{}, {} as u16);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -638,13 +672,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             I64Store8(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store8({} as usize{}, {} as u8);",
+                writeln!(
+                    writer,
+                    "{}self.env.store8({} as usize{}, {} as u8);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -653,13 +688,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             I64Store16(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store16({} as usize{}, {} as u16);",
+                writeln!(
+                    writer,
+                    "{}self.env.store16({} as usize{}, {} as u16);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -668,13 +704,14 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             I64Store32(_log_align, offset) => {
                 let value = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let addr = expr_builder.pop_formatted(precedence::AS).unwrap();
-                println!(
-                    "{}self.mem.store32({} as usize{}, {} as u32);",
+                writeln!(
+                    writer,
+                    "{}self.env.store32({} as usize{}, {} as u32);",
                     indentation,
                     addr,
                     if offset != 0 {
@@ -683,21 +720,22 @@ pub fn build(
                         String::new()
                     },
                     value
-                );
+                ).unwrap();
             }
             CurrentMemory(_) => {
                 let dst = format!("var{}", expr_index);
-                println!("{}let {} = self.mem.size();", indentation, dst);
+                writeln!(writer, "{}let {} = self.env.env_size();", indentation, dst).unwrap();
                 expr_index += 1;
                 expr_builder.push((precedence::PATH, dst));
             }
             GrowMemory(_) => {
                 let pages = expr_builder.pop_formatted(precedence::AS).unwrap();
                 let dst = format!("var{}", expr_index);
-                println!(
-                    "{}let {} = self.mem.grow({} as usize);",
+                writeln!(
+                    writer,
+                    "{}let {} = self.env.env_grow({} as usize);",
                     indentation, dst, pages
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, dst));
                 expr_index += 1;
             }
@@ -1184,7 +1222,8 @@ pub fn build(
             }
             F32Nearest => {
                 let (_, val) = expr_builder.pop().unwrap();
-                println!(
+                writeln!(
+                    writer,
                     "{0}let var{1} = {{
 {0}    let val = {2};
 {0}    let round = val.round();
@@ -1199,7 +1238,7 @@ pub fn build(
 {0}    }}
 {0}}};",
                     indentation, expr_index, val
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
@@ -1269,7 +1308,8 @@ pub fn build(
             }
             F64Nearest => {
                 let (_, val) = expr_builder.pop().unwrap();
-                println!(
+                writeln!(
+                    writer,
                     "{0}let var{1} = {{
 {0}    let val = {2};
 {0}    let round = val.round();
@@ -1284,7 +1324,7 @@ pub fn build(
 {0}    }}
 {0}}};",
                     indentation, expr_index, val
-                );
+                ).unwrap();
                 expr_builder.push((precedence::PATH, format!("var{}", expr_index)));
                 expr_index += 1;
             }
