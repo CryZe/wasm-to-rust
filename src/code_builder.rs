@@ -287,21 +287,33 @@ pub fn build<W: Write>(
                 }
             }
             Drop => {
-                expr_builder.pop().unwrap();
+                let (_, a) = expr_builder.pop().unwrap();
+                // We actually write out the expression, as it may have side
+                // effects. Atm we contain pretty much every side effect as its
+                // own non-dropped statement. However there are also side
+                // effects in just expressions, like a division by 0, which
+                // causes a panic. We want to preserve these semantics.
+                writeln!(writer, "{};", a).unwrap();
             }
             Select => {
-                // TODO Should not be short circuiting
                 let c = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
                 let (_, b) = expr_builder.pop().unwrap();
                 let (_, a) = expr_builder.pop().unwrap();
+                // Just like with drop, we have to evaluate both branches early,
+                // as they may have panics that wouldn't happen if there branch
+                // doesn't get chosen.
                 expr_builder.push((
                     precedence::MAX,
-                    format!("if {} != 0 {{ {} }} else {{ {} }}", c, a, b),
+                    format!(
+                        "{{ let a = {}; let b = {}; if {} != 0 {{ a }} else {{ b }} }}",
+                        a, b, c
+                    ),
                 ));
             }
             GetLocal(i) => {
-                // Can't be inline in an expression since it may be
-                // overwritten until it's used.
+                // Can't be inline in an expression since it may be overwritten
+                // until it's used. We need some proper pass to analyze this.
+                // Until then, stay conservative.
                 let dst = format!("var{}", expr_index);
                 writeln!(writer, "{}let {} = var{};", indentation, dst, i).unwrap();
                 expr_index += 1;
