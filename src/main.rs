@@ -233,7 +233,7 @@ fn main() {
         writer,
         "#![allow(
     unreachable_code, dead_code, unused_assignments, unused_mut, unused_variables, non_snake_case,
-    non_upper_case_globals, unused_parens, unconditional_recursion
+    non_upper_case_globals, unconditional_recursion, path_statements
 )]
 
 pub const PAGE_SIZE: usize = 64 << 10;
