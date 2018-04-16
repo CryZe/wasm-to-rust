@@ -454,7 +454,7 @@ pub fn build<W: Write>(
                 // own non-dropped statement. However there are also side
                 // effects in just expressions, like a division by 0, which
                 // causes a panic. We want to preserve these semantics.
-                writeln!(writer, "{};", a).unwrap();
+                writeln!(writer, "{}{};", indentation, a).unwrap();
             }
             Select => {
                 let c = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
