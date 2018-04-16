@@ -1,7 +1,40 @@
-use parity_wasm::elements::{BlockType, Opcode, Type, TypeSection};
 use expr_builder::ExprBuilder;
-use {precedence, to_rs_type, Function, Global, Indentation};
+use parity_wasm::elements::{BlockType, Opcode, Type, TypeSection};
+use reorder_analysis::can_local_be_reordered;
+use std::collections::BTreeMap;
 use std::io::Write;
+use {call_indirect_name, precedence, to_rs_type, BlockKind, Function, Global, Indentation};
+
+fn is_breakable_if(remaining_ops: &[Opcode]) -> bool {
+    let mut stack = 0;
+
+    for opcode in remaining_ops {
+        use parity_wasm::elements::Opcode::*;
+        match *opcode {
+            Block(_) | If(_) | Loop(_) => {
+                stack += 1;
+            }
+            End => {
+                if stack == 0 {
+                    return false;
+                }
+                stack -= 1;
+            }
+            Br(relative_depth) | BrIf(relative_depth) => {
+                if relative_depth == stack {
+                    return true;
+                }
+            }
+            BrTable(ref table, default_depth) => {
+                if table.iter().any(|&i| i == stack) || default_depth == stack {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("Unclosed block")
+}
 
 pub fn build<W: Write>(
     writer: &mut W,
@@ -10,37 +43,37 @@ pub fn build<W: Write>(
     import_count: usize,
     imported_globals_count: usize,
     functions: &[Function],
+    indirect_fns: &mut BTreeMap<u32, Vec<(u32, u32)>>,
     globals: &[Global],
     types: &TypeSection,
     code: &[Opcode],
     base_indentation: usize,
 ) {
     let mut expr_builder = ExprBuilder::new();
-    let mut block_types = Vec::new();
+    let mut blocks = Vec::new();
     let mut indentation = Indentation(base_indentation);
     let mut loop_count = 0;
 
-    block_types.push((
-        None,
-        if evaluates_to_value {
-            Some((precedence::PATH, String::new()))
-        } else {
-            None
-        },
-    ));
+    blocks.push(BlockKind::Function { evaluates_to_value });
 
-    for opcode in code {
-        // writeln!(writer, "{}// stack: {:?}", indentation, expr_builder);
+    let mut code = code.into_iter();
+    while let Some(opcode) = code.next() {
+        // writeln!(
+        //     writer,
+        //     "{}// opcode: {:?} stack: {:?} block types: {:?}",
+        //     indentation, opcode, expr_builder, blocks
+        // ).unwrap();
         use parity_wasm::elements::Opcode::*;
         match *opcode {
             Unreachable => {
                 writeln!(writer, "{}unreachable!();", indentation).unwrap();
             }
             Nop => {
-                assert!(expr_builder.is_empty());
+                // TODO Activate this again
+                // assert!(expr_builder.is_empty());
             }
             Block(block_type) => {
-                let block_type = if let BlockType::Value(ty) = block_type {
+                let dst_var = if let BlockType::Value(ty) = block_type {
                     let var_name = format!("var{}", expr_index);
                     writeln!(
                         writer,
@@ -50,139 +83,250 @@ pub fn build<W: Write>(
                         to_rs_type(ty)
                     ).unwrap();
                     expr_index += 1;
-                    Some((precedence::PATH, var_name))
+                    Some(var_name)
                 } else {
                     None
                 };
+
                 writeln!(writer, "{}'label{}: loop {{", indentation, loop_count).unwrap();
+                blocks.push(BlockKind::Block {
+                    label: loop_count,
+                    dst_var,
+                });
                 loop_count += 1;
                 indentation.0 += 1;
-                block_types.push((Some((loop_count - 1, false)), block_type));
             }
             Loop(block_type) => {
-                let block_type = if let BlockType::Value(ty) = block_type {
-                    let dst = format!("var{}", expr_index);
-                    writeln!(writer, "{}let {}: {};", indentation, dst, to_rs_type(ty)).unwrap();
+                let dst_var = if let BlockType::Value(ty) = block_type {
+                    let var_name = format!("var{}", expr_index);
+                    writeln!(
+                        writer,
+                        "{}let {}: {};",
+                        indentation,
+                        var_name,
+                        to_rs_type(ty)
+                    ).unwrap();
                     expr_index += 1;
-                    Some((precedence::PATH, dst))
+                    Some(var_name)
                 } else {
                     None
                 };
+
                 writeln!(writer, "{}'label{}: loop {{", indentation, loop_count).unwrap();
+                blocks.push(BlockKind::Loop {
+                    label: loop_count,
+                    dst_var,
+                });
                 loop_count += 1;
                 indentation.0 += 1;
-                block_types.push((Some((loop_count - 1, true)), block_type));
             }
             If(block_type) => {
-                let expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
-                let block_type = if let BlockType::Value(ty) = block_type {
-                    let dst = format!("var{}", expr_index);
-                    writeln!(writer, "{}let {}: {};", indentation, dst, to_rs_type(ty)).unwrap();
+                let dst_var = if let BlockType::Value(ty) = block_type {
+                    let var_name = format!("var{}", expr_index);
+                    writeln!(
+                        writer,
+                        "{}let {}: {};",
+                        indentation,
+                        var_name,
+                        to_rs_type(ty)
+                    ).unwrap();
                     expr_index += 1;
-                    Some((precedence::PATH, dst))
+                    Some(var_name)
                 } else {
                     None
                 };
+
+                let is_breakable = is_breakable_if(code.as_slice());
+
+                if is_breakable {
+                    writeln!(writer, "{}'label{}: loop {{", indentation, loop_count).unwrap();
+                }
+                blocks.push(BlockKind::If {
+                    label: loop_count,
+                    dst_var,
+                    is_breakable,
+                });
+                if is_breakable {
+                    loop_count += 1;
+                    indentation.0 += 1;
+                }
+
+                let expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
                 writeln!(writer, "{}if {} != 0 {{", indentation, expr).unwrap();
                 indentation.0 += 1;
-                block_types.push((None, block_type));
             }
             Else => {
-                let &(_, ref block_type) = block_types.last().unwrap();
-                if let &Some((_, ref target_var)) = block_type {
-                    let (_, expr) = expr_builder.pop().unwrap();
-                    writeln!(writer, "{}{} = {};", indentation, target_var, expr).unwrap();
+                if let Some(&BlockKind::If { ref dst_var, .. }) = blocks.last() {
+                    if let &Some(ref dst_var) = dst_var {
+                        let (_, expr) = expr_builder.pop().unwrap();
+                        writeln!(writer, "{}{} = {};", indentation, dst_var, expr).unwrap();
+                    }
+                    indentation.0 -= 1;
+                    writeln!(writer, "{}}} else {{", indentation).unwrap();
+                    indentation.0 += 1;
+                } else {
+                    panic!("Else can only be used with an if");
                 }
-                indentation.0 -= 1;
-                writeln!(writer, "{}}} else {{", indentation).unwrap();
-                indentation.0 += 1;
             }
             End => {
-                let (is_loop, block_type) = block_types.pop().unwrap();
-                if is_loop.is_some() {
-                    if let Some((precedence, target_var)) = block_type {
-                        if let Some((_, expr)) = expr_builder.pop() {
-                            writeln!(writer, "{}{} = {};", indentation, target_var, expr).unwrap();
-                            expr_builder.push((precedence, target_var));
-                            writeln!(writer, "{}break;", indentation).unwrap();
-                        } else {
-                            writeln!(writer, "{}// There should've been a loop expression value here, but this may be unreachable", indentation).unwrap();
-                            writeln!(writer, "{}unreachable!()", indentation).unwrap();
+                match blocks.pop().expect("End used outside of a block") {
+                    BlockKind::Block { dst_var, .. } | BlockKind::Loop { dst_var, .. } => {
+                        if let Some(dst_var) = dst_var {
+                            if let Some((_, expr)) = expr_builder.pop() {
+                                writeln!(writer, "{}{} = {};", indentation, dst_var, expr).unwrap();
+                                expr_builder.push((precedence::PATH, dst_var));
+                            } else {
+                                writeln!(writer, "{}// There should've been an expression value here, but this may be unreachable", indentation).unwrap();
+                                writeln!(writer, "{}unreachable!()", indentation).unwrap();
+                            }
                         }
-                    } else {
                         writeln!(writer, "{}break;", indentation).unwrap();
                     }
-                } else {
-                    if !block_types.is_empty() {
-                        if let Some((precedence, target_var)) = block_type {
+                    BlockKind::If {
+                        dst_var,
+                        is_breakable,
+                        ..
+                    } => {
+                        if let Some(dst_var) = dst_var {
                             if let Some((_, expr)) = expr_builder.pop() {
-                                writeln!(writer, "{}{} = {};", indentation, target_var, expr)
-                                    .unwrap();
-                                expr_builder.push((precedence, target_var));
+                                writeln!(writer, "{}{} = {};", indentation, dst_var, expr).unwrap();
+                                expr_builder.push((precedence::PATH, dst_var));
                             } else {
-                                writeln!(writer, "{}// This seems to be unreachable", indentation)
-                                    .unwrap();
+                                writeln!(writer, "{}// There should've been an expression value here, but this may be unreachable", indentation).unwrap();
+                                writeln!(writer, "{}unreachable!()", indentation).unwrap();
+                            }
+                        }
+                        if is_breakable {
+                            indentation.0 -= 1;
+                            writeln!(writer, "{}}}", indentation).unwrap();
+                            writeln!(writer, "{}break;", indentation).unwrap();
+                        }
+                    }
+                    BlockKind::Function { evaluates_to_value } => {
+                        if evaluates_to_value {
+                            if let Some((_, expr)) = expr_builder.pop() {
+                                writeln!(writer, "{}{}", indentation, expr).unwrap();
+                            } else {
+                                writeln!(writer, "{}// There should've been an expression value here, but this may be unreachable", indentation).unwrap();
                                 writeln!(writer, "{}unreachable!()", indentation).unwrap();
                             }
                         }
                     }
                 }
-                if block_types.is_empty() {
-                    if let Some((_, expr)) = expr_builder.pop() {
-                        writeln!(writer, "{}{}", indentation, expr).unwrap();
-                    }
-                    assert!(expr_builder.is_empty());
-                    indentation.0 -= 1;
-                    write!(writer, "{}}}", indentation).unwrap();
-                } else {
-                    indentation.0 -= 1;
-                    writeln!(writer, "{}}}", indentation).unwrap();
-                }
+
+                indentation.0 -= 1;
+                writeln!(writer, "{}}}", indentation).unwrap();
             }
             Br(relative_depth) => {
-                let &(loop_info, ref block_type) = block_types
+                let block = blocks
                     .iter()
                     .rev()
                     .nth(relative_depth as usize)
-                    .unwrap();
-                let (label, is_a_loop) = loop_info.unwrap();
+                    .expect("Branch Index out of Bounds");
 
-                if let &Some((_, ref target_var)) = block_type {
-                    let (_, expr) = expr_builder.pop().unwrap();
-                    writeln!(writer, "{}{} = {};", indentation, target_var, expr).unwrap();
+                match *block {
+                    BlockKind::Function { evaluates_to_value } => {
+                        if evaluates_to_value {
+                            let (_, expr) = expr_builder.pop().unwrap();
+                            writeln!(writer, "{}return {};", indentation, expr).unwrap();
+                        } else {
+                            writeln!(writer, "{}return;", indentation).unwrap();
+                        }
+                    }
+                    BlockKind::Block { ref dst_var, label }
+                    | BlockKind::If {
+                        ref dst_var, label, ..
+                    } => {
+                        if let &Some(ref dst_var) = dst_var {
+                            let (_, expr) = expr_builder.pop().unwrap();
+                            writeln!(writer, "{}{} = {};", indentation, dst_var, expr).unwrap();
+                        }
+                        writeln!(writer, "{}break 'label{};", indentation, label).unwrap();
+                    }
+                    BlockKind::Loop { ref dst_var, label } => {
+                        if let &Some(ref dst_var) = dst_var {
+                            let (_, expr) = expr_builder.pop().unwrap();
+                            writeln!(writer, "{}{} = {};", indentation, dst_var, expr).unwrap();
+                        }
+                        writeln!(writer, "{}continue 'label{};", indentation, label).unwrap();
+                    }
                 }
-
-                writeln!(
-                    writer,
-                    "{}{} 'label{};",
-                    indentation,
-                    if is_a_loop { "continue" } else { "break" },
-                    label
-                ).unwrap();
             }
             BrIf(relative_depth) => {
-                let expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
-                let &(loop_info, ref block_type) = block_types
+                let cond_expr = expr_builder.pop_formatted(precedence::COMPARISON).unwrap();
+                let block = blocks
                     .iter()
                     .rev()
                     .nth(relative_depth as usize)
-                    .unwrap();
-                let (label, is_a_loop) = loop_info.unwrap();
+                    .expect("Branch Index out of Bounds");
 
-                writeln!(writer, "{}if {} != 0 {{", indentation, expr).unwrap();
+                let evaluates_to_value = match *block {
+                    BlockKind::Block { ref dst_var, .. }
+                    | BlockKind::Loop { ref dst_var, .. }
+                    | BlockKind::If { ref dst_var, .. } => dst_var.is_some(),
+                    BlockKind::Function { evaluates_to_value } => evaluates_to_value,
+                };
 
-                if let &Some((_, ref target_var)) = block_type {
-                    let &(_, ref expr) = expr_builder.inner().last().unwrap();
-                    writeln!(writer, "{}    {} = {};", indentation, target_var, expr).unwrap();
+                // TODO This evaluates cond and val out of order. So this relies
+                // on them not having any side effects
+
+                let tmp_var = if evaluates_to_value {
+                    let tmp_var = format!("var{}", expr_index);
+                    {
+                        let &(_, ref tmp_var_val) = expr_builder.inner().last().unwrap();
+                        writeln!(writer, "{}let {} = {};", indentation, tmp_var, tmp_var_val)
+                            .unwrap();
+                    }
+                    expr_index += 1;
+                    expr_builder.push((precedence::PATH, tmp_var.clone()));
+                    Some(tmp_var)
+                } else {
+                    None
+                };
+
+                writeln!(writer, "{}if {} != 0 {{", indentation, cond_expr).unwrap();
+
+                indentation.0 += 1;
+
+                match *block {
+                    BlockKind::Block { label, ref dst_var }
+                    | BlockKind::If {
+                        label, ref dst_var, ..
+                    } => {
+                        if let Some(tmp_var) = tmp_var {
+                            writeln!(
+                                writer,
+                                "{}{} = {};",
+                                indentation,
+                                dst_var.as_ref().unwrap(),
+                                tmp_var,
+                            ).unwrap();
+                        }
+                        writeln!(writer, "{}break 'label{};", indentation, label).unwrap();
+                    }
+                    BlockKind::Loop { label, ref dst_var } => {
+                        if let Some(tmp_var) = tmp_var {
+                            writeln!(
+                                writer,
+                                "{}{} = {};",
+                                indentation,
+                                dst_var.as_ref().unwrap(),
+                                tmp_var,
+                            ).unwrap();
+                        }
+                        writeln!(writer, "{}continue 'label{};", indentation, label).unwrap();
+                    }
+                    BlockKind::Function { .. } => {
+                        if let Some(tmp_var) = tmp_var {
+                            writeln!(writer, "{}return {};", indentation, tmp_var).unwrap();
+                        } else {
+                            writeln!(writer, "{}return;", indentation).unwrap();
+                        }
+                    }
                 }
 
-                writeln!(
-                    writer,
-                    "{}    {} 'label{};",
-                    indentation,
-                    if is_a_loop { "continue" } else { "break" },
-                    label
-                ).unwrap();
+                indentation.0 -= 1;
+
                 writeln!(writer, "{}}}", indentation).unwrap();
             }
             BrTable(ref table, default_depth) => {
@@ -191,34 +335,48 @@ pub fn build<W: Write>(
                 writeln!(writer, "{}match {} {{", indentation, expr).unwrap();
                 indentation.0 += 1;
                 for (index, &relative_depth) in table.iter().enumerate() {
-                    let &(loop_info, _) = block_types
+                    let block = blocks
                         .iter()
                         .rev()
                         .nth(relative_depth as usize)
-                        .unwrap();
-                    let (label, is_a_loop) = loop_info.unwrap();
-                    writeln!(
-                        writer,
-                        "{}{} => {} 'label{},",
-                        indentation,
-                        index,
-                        if is_a_loop { "continue" } else { "break" },
-                        label
-                    ).unwrap();
+                        .expect("Branch Index out of Bounds");
+
+                    match *block {
+                        BlockKind::Block { label, .. } | BlockKind::If { label, .. } => {
+                            writeln!(writer, "{}{} => break 'label{},", indentation, index, label)
+                                .unwrap();
+                        }
+                        BlockKind::Loop { label, .. } => {
+                            writeln!(
+                                writer,
+                                "{}{} => continue 'label{},",
+                                indentation, index, label
+                            ).unwrap();
+                        }
+                        BlockKind::Function { .. } => {
+                            writeln!(writer, "{}_ => return,", indentation).unwrap();
+                        }
+                    }
                 }
-                let &(loop_info, _) = block_types
+
+                let block = blocks
                     .iter()
                     .rev()
                     .nth(default_depth as usize)
-                    .unwrap();
-                let (label, is_a_loop) = loop_info.unwrap();
-                writeln!(
-                    writer,
-                    "{}_ => {} 'label{},",
-                    indentation,
-                    if is_a_loop { "continue" } else { "break" },
-                    label
-                ).unwrap();
+                    .expect("Branch Index out of Bounds");
+
+                match *block {
+                    BlockKind::Block { label, .. } | BlockKind::If { label, .. } => {
+                        writeln!(writer, "{}_ => break 'label{},", indentation, label).unwrap();
+                    }
+                    BlockKind::Loop { label, .. } => {
+                        writeln!(writer, "{}_ => continue 'label{},", indentation, label).unwrap();
+                    }
+                    BlockKind::Function { .. } => {
+                        writeln!(writer, "{}_ => return,", indentation).unwrap();
+                    }
+                }
+
                 indentation.0 -= 1;
                 writeln!(writer, "{}}}", indentation).unwrap();
             }
@@ -266,6 +424,8 @@ pub fn build<W: Write>(
             }
             CallIndirect(type_index, _) => {
                 let Type::Function(ref fn_type) = types.types()[type_index as usize];
+                indirect_fns.entry(type_index).or_insert_with(Vec::new);
+
                 write!(writer, "{}", indentation).unwrap();
                 if fn_type.return_type().is_some() {
                     write!(writer, "let var{} = ", expr_index).unwrap();
@@ -273,8 +433,9 @@ pub fn build<W: Write>(
                 let (_, fn_ptr) = expr_builder.pop().unwrap();
                 write!(
                     writer,
-                    "self.call_indirect{}(imports, {}",
-                    type_index, fn_ptr
+                    "self.{}(imports, {}",
+                    call_indirect_name(fn_type),
+                    fn_ptr
                 ).unwrap();
                 let index = expr_builder.len() - fn_type.params().len();
                 for (_, expr) in expr_builder.inner().drain(index..) {
@@ -311,13 +472,15 @@ pub fn build<W: Write>(
                 ));
             }
             GetLocal(i) => {
-                // Can't be inline in an expression since it may be overwritten
-                // until it's used. We need some proper pass to analyze this.
-                // Until then, stay conservative.
-                let dst = format!("var{}", expr_index);
-                writeln!(writer, "{}let {} = var{};", indentation, dst, i).unwrap();
-                expr_index += 1;
-                expr_builder.push((precedence::PATH, dst));
+                if can_local_be_reordered(i, &blocks, functions, types, code.as_slice()) {
+                    let dst = format!("var{}", i);
+                    expr_builder.push((precedence::PATH, dst));
+                } else {
+                    let dst = format!("var{}", expr_index);
+                    writeln!(writer, "{}let {} = var{};", indentation, dst, i).unwrap();
+                    expr_index += 1;
+                    expr_builder.push((precedence::PATH, dst));
+                }
             }
             SetLocal(i) => {
                 let (_, expr) = expr_builder.pop().unwrap();
@@ -326,10 +489,16 @@ pub fn build<W: Write>(
             TeeLocal(i) => {
                 let (_, expr) = expr_builder.pop().unwrap();
                 writeln!(writer, "{}var{} = {};", indentation, i, expr).unwrap();
-                let dst = format!("var{}", expr_index);
-                writeln!(writer, "{}let {} = var{};", indentation, dst, i).unwrap();
-                expr_index += 1;
-                expr_builder.push((precedence::PATH, dst));
+
+                if can_local_be_reordered(i, &blocks, functions, types, code.as_slice()) {
+                    let dst = format!("var{}", i);
+                    expr_builder.push((precedence::PATH, dst));
+                } else {
+                    let dst = format!("var{}", expr_index);
+                    writeln!(writer, "{}let {} = var{};", indentation, dst, i).unwrap();
+                    expr_index += 1;
+                    expr_builder.push((precedence::PATH, dst));
+                }
             }
             GetGlobal(i) => {
                 let global = &globals[i as usize];

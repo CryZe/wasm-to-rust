@@ -95,10 +95,6 @@ impl ExprBuilder {
         format(precedence, self.stack.pop()?).into()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.stack.is_empty()
-    }
-
     pub fn len(&self) -> usize {
         self.stack.len()
     }

@@ -1,6 +1,8 @@
 extern crate parity_wasm;
 #[macro_use]
 extern crate structopt;
+extern crate unicode_xid;
+extern crate unidecode;
 
 use parity_wasm::deserialize_file;
 use parity_wasm::elements::{External, FunctionType, ImportCountType, Internal, NameSection,
@@ -10,13 +12,22 @@ use std::path::PathBuf;
 use structopt::StructOpt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use unicode_xid::UnicodeXID;
+use unidecode::unidecode_char;
 
 mod precedence;
 mod expr_builder;
 mod code_builder;
+mod reorder_analysis;
 
 #[derive(StructOpt)]
 struct Opt {
+    #[structopt(short = "n", long = "use-name-section",
+                help = "Use the names in the name section for the internal function names")]
+    use_name_section: bool,
+    #[structopt(short = "c", long = "public-call-indirect",
+                help = "Make indirect calling available in the API")]
+    public_call_indirect: bool,
     #[structopt(help = "Input file", parse(from_os_str))]
     input: PathBuf,
     #[structopt(help = "Output file, stored next to wasm file if not specified",
@@ -29,6 +40,7 @@ pub struct Function<'a> {
     ty: &'a FunctionType,
     ty_index: u32,
     real_name: Option<&'a String>,
+    make_public: bool,
 }
 
 pub struct Global<'a> {
@@ -40,6 +52,26 @@ pub struct Global<'a> {
     init_code: Option<&'a [Opcode]>,
 }
 
+#[derive(Debug)]
+pub enum BlockKind {
+    Function {
+        evaluates_to_value: bool,
+    },
+    Block {
+        label: usize,
+        dst_var: Option<String>,
+    },
+    If {
+        label: usize,
+        dst_var: Option<String>,
+        is_breakable: bool,
+    },
+    Loop {
+        label: usize,
+        dst_var: Option<String>,
+    },
+}
+
 fn to_rs_type(t: ValueType) -> &'static str {
     match t {
         ValueType::I32 => "i32",
@@ -48,21 +80,6 @@ fn to_rs_type(t: ValueType) -> &'static str {
         ValueType::F64 => "f64",
     }
 }
-
-// fn write_signature<W: Write>(writer: &mut W, fn_type: &FunctionType, mut_vars: bool) {
-//     write!(writer, "(&mut self").unwrap();
-//     for (i, &param) in fn_type.params().iter().enumerate() {
-//         write!(writer, ",").unwrap();
-//         if mut_vars {
-//             write!(writer, " mut").unwrap();
-//         }
-//         write!(writer, " var{}: {}", i, to_rs_type(param)).unwrap();
-//     }
-//     write!(writer, ")").unwrap();
-//     if let Some(ret_ty) = fn_type.return_type() {
-//         write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
-//     }
-// }
 
 use std::fmt;
 
@@ -75,6 +92,63 @@ impl fmt::Display for Indentation {
         }
         Ok(())
     }
+}
+
+fn mangle_fn_name(name: &str) -> String {
+    let mut s = String::new();
+    for (i, mut c) in name.chars().enumerate() {
+        if i == 0 {
+            if UnicodeXID::is_xid_start(c) {
+                s.push(c);
+                continue;
+            }
+            s.push('_');
+        }
+
+        if UnicodeXID::is_xid_continue(c) {
+            s.push(c);
+            continue;
+        }
+
+        let decoded = unidecode_char(c);
+        if decoded == "[?]" {
+            if s.chars().last() != Some('_') {
+                s.push('_');
+            }
+            continue;
+        }
+
+        for c in decoded.chars() {
+            if UnicodeXID::is_xid_continue(c) {
+                s.push(c);
+            } else {
+                if s.chars().last() != Some('_') {
+                    s.push('_');
+                }
+            }
+        }
+    }
+    s
+}
+
+fn call_indirect_name(f: &FunctionType) -> String {
+    let mut s = String::from("call_indirect_");
+    for param in f.params() {
+        s.push_str(match *param {
+            ValueType::I32 => "i",
+            ValueType::I64 => "l",
+            ValueType::F32 => "f",
+            ValueType::F64 => "d",
+        });
+    }
+    s.push_str(match f.return_type() {
+        Some(ValueType::I32) => "_i",
+        Some(ValueType::I64) => "_l",
+        Some(ValueType::F32) => "_f",
+        Some(ValueType::F64) => "_d",
+        None => "_v",
+    });
+    s
 }
 
 fn main() {
@@ -116,6 +190,7 @@ fn main() {
                     ty: fn_type,
                     ty_index,
                     real_name: None,
+                    make_public: false,
                 });
             }
         }
@@ -124,18 +199,31 @@ fn main() {
     for function in fns.entries() {
         let ty_index = function.type_ref();
         let Type::Function(ref fn_type) = types.types()[ty_index as usize];
-        let real_name = function_names.and_then(|f| f.names().get(functions.len() as _));
-        let name = format!("func{}", functions.len());
+        let mut real_name = function_names.and_then(|f| f.names().get(functions.len() as _));
+        let mut name = format!("func{}", functions.len());
+        if opt.use_name_section {
+            if let Some(real_name) = real_name.take() {
+                name = real_name.to_string();
+                while functions.iter().any(|f| f.name == name) {
+                    name.push_str("_");
+                }
+            }
+        }
         functions.push(Function {
             name,
             ty: fn_type,
             ty_index,
             real_name,
+            make_public: false,
         });
     }
 
+    for function in &mut functions {
+        function.name = mangle_fn_name(&function.name);
+    }
+
     writeln!(writer,
-        "#![allow(unreachable_code, dead_code, unused_assignments, unused_mut, unused_variables, non_snake_case, non_upper_case_globals, unused_parens)]
+        "#![allow(unreachable_code, dead_code, unused_assignments, unused_mut, unused_variables, non_snake_case, non_upper_case_globals, unused_parens, unconditional_recursion)]
 
 pub const PAGE_SIZE: usize = 64 << 10;
 
@@ -239,7 +327,7 @@ pub trait Memory {
     fn store32(&mut self, addr: usize, val: u32);
     fn store64(&mut self, addr: usize, val: u64);
 
-    fn store_slice(&mut self, addr: usize, val: &[u8]);
+    fn store_slice(&mut self, addr: usize, val: &'static [u8]);
 
     fn grow(&mut self, pages: usize) -> i32;
     fn size(&mut self) -> i32;
@@ -317,21 +405,32 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
             let offset = entry.offset().code();
             assert!(offset.len() == 2);
             if let Opcode::I32Const(c) = offset[0] {
-                write!(writer, r#"        memory.store_slice({}, b""#, c,).unwrap();
-                for &b in entry.value() {
-                    match b {
-                        b'"' => write!(writer, r#"\""#).unwrap(),
-                        b'\\' => write!(writer, r#"\\"#).unwrap(),
-                        b'\r' => write!(writer, r#"\r"#).unwrap(),
-                        b'\n' => write!(writer, r#"\n"#).unwrap(),
-                        b'\t' => write!(writer, r#"\t"#).unwrap(),
-                        0x00...0x7F => {
-                            write!(writer, "{}", std::char::from_u32(b as _).unwrap()).unwrap()
+                if entry.value().windows(2).all(|a| a[0] == a[1]) {
+                    writeln!(
+                        writer,
+                        r#"        memory.store_slice({}, &[{}; {}]);"#,
+                        c,
+                        entry.value().first().cloned().unwrap_or_default(),
+                        entry.value().len()
+                    ).unwrap();
+                } else {
+                    write!(writer, r#"        memory.store_slice({}, b""#, c).unwrap();
+                    for &b in entry.value() {
+                        match b {
+                            b'\0' => write!(writer, r#"\0"#).unwrap(),
+                            b'"' => write!(writer, r#"\""#).unwrap(),
+                            b'\\' => write!(writer, r#"\\"#).unwrap(),
+                            b'\r' => write!(writer, r#"\r"#).unwrap(),
+                            b'\n' => write!(writer, r#"\n"#).unwrap(),
+                            b'\t' => write!(writer, r#"\t"#).unwrap(),
+                            0x00...0x7F => {
+                                write!(writer, "{}", std::char::from_u32(b as _).unwrap()).unwrap()
+                            }
+                            _ => write!(writer, r#"\x{:X}"#, b).unwrap(),
                         }
-                        _ => write!(writer, r#"\x{:X}"#, b).unwrap(),
                     }
+                    writeln!(writer, r#"");"#,).unwrap();
                 }
-                writeln!(writer, r#"");"#,).unwrap();
             } else {
                 panic!("Data Segment with init expression mismatch");
             }
@@ -390,7 +489,11 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
     for export in exports.entries() {
         if let &Internal::Function(fn_index) = export.internal() {
             let function = &functions[fn_index as usize];
-            write!(writer, "    pub fn {}(&mut self", export.field()).unwrap();
+            write!(
+                writer,
+                "    pub fn {}(&mut self",
+                mangle_fn_name(export.field())
+            ).unwrap();
             for (i, &param) in function.ty.params().iter().enumerate() {
                 write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
             }
@@ -412,6 +515,54 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
         }
     }
 
+    let mut indirect_fns = BTreeMap::new();
+
+    if let Some(entry) = module.elements_section().and_then(|e| e.entries().get(0)) {
+        let init_val = entry.offset().code();
+        assert!(init_val.len() == 2);
+        let offset = match init_val[0] {
+            Opcode::I32Const(c) => c,
+            _ => panic!("Unexpected Element Section Offset"),
+        };
+        for (fn_ptr, &fn_index) in entry.members().iter().enumerate() {
+            let type_index = functions[fn_index as usize].ty_index;
+            indirect_fns
+                .entry(type_index)
+                .or_insert_with(Vec::new)
+                .push(((fn_ptr as i32 + offset) as u32, fn_index));
+        }
+    }
+
+    if opt.public_call_indirect {
+        for (&type_index, _) in &indirect_fns {
+            let Type::Function(ref fn_type) = types.types()[type_index as usize];
+            let fn_name = call_indirect_name(fn_type);
+            write!(writer, "    pub fn {}", fn_name).unwrap();
+            write!(writer, "(&mut self, ptr: i32").unwrap();
+            for (i, &param) in fn_type.params().iter().enumerate() {
+                write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
+            }
+            write!(writer, ")").unwrap();
+            if let Some(ret_ty) = fn_type.return_type() {
+                write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
+            }
+            write!(
+                writer,
+                " {{
+        self.context.{}(&mut self.imports, ptr",
+                fn_name
+            ).unwrap();
+            for (i, _) in fn_type.params().iter().enumerate() {
+                write!(writer, ", var{}", i).unwrap();
+            }
+            writeln!(
+                writer,
+                r#")
+    }}"#
+            ).unwrap();
+        }
+    }
+
     writeln!(
         writer,
         "{}",
@@ -428,6 +579,7 @@ impl<M: Memory> Context<M> {"#
         for global in &globals[imported_globals_count..] {
             if let Some(ref init_code) = global.init_code {
                 writeln!(writer, "        self.{} = {{", global.name).unwrap();
+                // TODO Handle Returns in here correctly
                 code_builder::build(
                     &mut writer,
                     0,
@@ -435,6 +587,7 @@ impl<M: Memory> Context<M> {"#
                     import_count,
                     imported_globals_count,
                     &functions,
+                    &mut indirect_fns,
                     &globals,
                     types,
                     init_code,
@@ -448,11 +601,15 @@ impl<M: Memory> Context<M> {"#
 
     for export in exports.entries() {
         if let &Internal::Function(fn_index) = export.internal() {
-            let function = &functions[fn_index as usize];
+            let function = &mut functions[fn_index as usize];
+            if function.name == export.field() {
+                function.make_public = true;
+                continue;
+            }
             write!(
                 writer,
                 "    pub fn {}<I: Imports<Memory = M>>(&mut self, imports: &mut I",
-                export.field()
+                mangle_fn_name(export.field())
             ).unwrap();
             for (i, &param) in function.ty.params().iter().enumerate() {
                 write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
@@ -478,14 +635,19 @@ impl<M: Memory> Context<M> {"#
             Type::Function(ref t) => t,
         };
         let fn_index = import_count + i;
+        let function = &functions[fn_index];
         // TODO Ensure there's no collisions with the exports
-        if let Some(real_name) = functions[fn_index].real_name {
+        if let Some(real_name) = function.real_name {
             writeln!(writer, "    // {}", real_name).unwrap();
+        }
+        write!(writer, "    ").unwrap();
+        if function.make_public {
+            write!(writer, "pub ").unwrap();
         }
         write!(
             writer,
-            "    fn func{}<I: Imports<Memory = M>>(&mut self, imports: &mut I",
-            fn_index
+            "fn {}<I: Imports<Memory = M>>(&mut self, imports: &mut I",
+            function.name
         ).unwrap();
         for (i, &param) in fn_type.params().iter().enumerate() {
             write!(writer, ", mut var{}: {}", i, to_rs_type(param)).unwrap();
@@ -517,73 +679,68 @@ impl<M: Memory> Context<M> {"#
             import_count,
             imported_globals_count,
             &functions,
+            &mut indirect_fns,
             &globals,
             types,
             body.code().elements(),
             2,
         );
-
-        writeln!(writer).unwrap();
     }
 
-    if let Some(entry) = module.elements_section().and_then(|e| e.entries().get(0)) {
-        let mut indirect_fns = BTreeMap::new();
-        // TODO Handle offset
-        for (fn_ptr, &fn_index) in entry.members().iter().enumerate() {
-            let type_index = functions[fn_index as usize].ty_index;
-            indirect_fns
-                .entry(type_index)
-                .or_insert_with(Vec::new)
-                .push((fn_ptr, fn_index));
+    for (type_index, fns) in indirect_fns {
+        let Type::Function(ref fn_type) = types.types()[type_index as usize];
+        write!(writer, "    ").unwrap();
+        if opt.public_call_indirect {
+            write!(writer, "pub ").unwrap();
         }
-
-        for (type_index, fns) in indirect_fns {
-            let Type::Function(ref fn_type) = types.types()[type_index as usize];
-            write!(writer, "    fn call_indirect{}<I: Imports>", type_index).unwrap();
-            write!(writer, "(&mut self, imports: &mut I, ptr: i32").unwrap();
-            for (i, &param) in fn_type.params().iter().enumerate() {
-                write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
-            }
-            write!(writer, ")").unwrap();
-            if let Some(ret_ty) = fn_type.return_type() {
-                write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
-            }
-            writeln!(
-                writer,
-                " {{
+        write!(
+            writer,
+            "fn {}<I: Imports<Memory = M>>",
+            call_indirect_name(fn_type),
+        ).unwrap();
+        write!(writer, "(&mut self, imports: &mut I, ptr: i32").unwrap();
+        for (i, &param) in fn_type.params().iter().enumerate() {
+            write!(writer, ", var{}: {}", i, to_rs_type(param)).unwrap();
+        }
+        write!(writer, ")").unwrap();
+        if let Some(ret_ty) = fn_type.return_type() {
+            write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
+        }
+        writeln!(
+            writer,
+            " {{
         match ptr {{"
-            ).unwrap();
-            for (fn_ptr, fn_index) in fns {
-                let function = &functions[fn_index as usize];
-                write!(writer, "            {} => ", fn_ptr).unwrap();
-                let is_imported = (fn_index as usize) < import_count;
-                if is_imported {
-                    write!(writer, "imports.").unwrap();
-                } else {
-                    write!(writer, "self.").unwrap();
-                }
-                write!(writer, "{}(", function.name).unwrap();
-                if is_imported {
-                    write!(writer, "self").unwrap();
-                } else {
-                    write!(writer, "imports").unwrap();
-                }
-                for i in 0..function.ty.params().len() {
-                    write!(writer, ", var{}", i).unwrap();
-                }
-                if let Some(real_name) = function.real_name {
-                    writeln!(writer, "), // {}", real_name).unwrap();
-                } else {
-                    writeln!(writer, "),").unwrap();
-                }
+        ).unwrap();
+        for (fn_ptr, fn_index) in fns {
+            let function = &functions[fn_index as usize];
+            write!(writer, "            {} => ", fn_ptr).unwrap();
+            let is_imported = (fn_index as usize) < import_count;
+            if is_imported {
+                write!(writer, "imports.").unwrap();
+            } else {
+                write!(writer, "self.").unwrap();
             }
-            writeln!(
-                writer,
-                r#"            _ => panic!("Invalid Function Pointer"),
+            write!(writer, "{}(", function.name).unwrap();
+            if is_imported {
+                write!(writer, "self").unwrap();
+            } else {
+                write!(writer, "imports").unwrap();
+            }
+            for i in 0..function.ty.params().len() {
+                write!(writer, ", var{}", i).unwrap();
+            }
+            if let Some(real_name) = function.real_name {
+                writeln!(writer, "), // {}", real_name).unwrap();
+            } else {
+                writeln!(writer, "),").unwrap();
+            }
+        }
+        writeln!(
+            writer,
+            r#"            _ => panic!("Invalid Function Pointer"),
         }}
     }}"#
-            ).unwrap();
-        }
+        ).unwrap();
     }
 
     writeln!(writer, "}}").unwrap();
