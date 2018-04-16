@@ -15,7 +15,7 @@ impl ExprBuilder {
         F: FnOnce(&Formatted) -> String,
     {
         let a = self.stack.pop().unwrap();
-        let expr = f(&format(precedence, a));
+        let expr = f(&format(precedence, a, false));
         self.stack.push((precedence, expr));
     }
 
@@ -24,7 +24,7 @@ impl ExprBuilder {
         F: FnOnce(&Formatted) -> String,
     {
         let a = self.stack.pop().unwrap();
-        let expr = f(&format(precedence_a, a));
+        let expr = f(&format(precedence_a, a, false));
         self.stack.push((precedence_result, expr));
     }
 
@@ -34,7 +34,7 @@ impl ExprBuilder {
     {
         let b = self.stack.pop().unwrap();
         let a = self.stack.pop().unwrap();
-        let expr = f(&format(precedence, a), &format(precedence, b));
+        let expr = f(&format(precedence, a, true), &format(precedence, b, false));
         self.stack.push((precedence, expr));
     }
 
@@ -49,7 +49,10 @@ impl ExprBuilder {
     {
         let b = self.stack.pop().unwrap();
         let a = self.stack.pop().unwrap();
-        let expr = f(&format(precedence_a, a), &format(precedence_b, b));
+        let expr = f(
+            &format(precedence_a, a, true),
+            &format(precedence_b, b, false),
+        );
         self.stack.push((precedence_result, expr));
     }
 
@@ -60,7 +63,7 @@ impl ExprBuilder {
         let b = self.stack.pop().unwrap();
         let a = self.stack.pop().unwrap();
         let expr = f(
-            &format(precedence, a),
+            &format(precedence, a, true),
             &format(
                 if b.0 == precedence {
                     precedence::MIN
@@ -68,6 +71,7 @@ impl ExprBuilder {
                     precedence
                 },
                 b,
+                false,
             ),
         );
         self.stack.push((precedence, expr));
@@ -79,7 +83,7 @@ impl ExprBuilder {
     {
         let (_, b) = self.stack.pop().unwrap();
         let a = self.stack.pop().unwrap();
-        let expr = f(&format(precedence, a), &b);
+        let expr = f(&format(precedence, a, false), &b);
         self.stack.push((precedence, expr));
     }
 
@@ -92,7 +96,7 @@ impl ExprBuilder {
     }
 
     pub fn pop_formatted(&mut self, precedence: usize) -> Option<Formatted> {
-        format(precedence, self.stack.pop()?).into()
+        format(precedence, self.stack.pop()?, false).into()
     }
 
     pub fn len(&self) -> usize {
@@ -104,10 +108,15 @@ impl ExprBuilder {
     }
 }
 
-fn format(outer_precedence: usize, (inner_precedence, s): (usize, String)) -> Formatted {
+fn format(
+    outer_precedence: usize,
+    (inner_precedence, s): (usize, String),
+    is_left: bool,
+) -> Formatted {
     Formatted {
         outer_precedence,
         inner_precedence,
+        is_left,
         s,
     }
 }
@@ -115,6 +124,7 @@ fn format(outer_precedence: usize, (inner_precedence, s): (usize, String)) -> Fo
 pub struct Formatted {
     outer_precedence: usize,
     inner_precedence: usize,
+    is_left: bool,
     s: String,
 }
 
@@ -125,6 +135,8 @@ impl fmt::Display for Formatted {
         if self.inner_precedence > self.outer_precedence
             || (self.inner_precedence == precedence::COMPARISON
                 && self.outer_precedence == precedence::COMPARISON)
+            || (self.is_left && self.outer_precedence == precedence::COMPARISON
+                && self.inner_precedence == precedence::AS)
         {
             write!(f, "({})", self.s)
         } else {

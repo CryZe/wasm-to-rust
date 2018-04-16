@@ -982,10 +982,10 @@ pub fn build<W: Write>(
             }
             I32LtS => {
                 expr_builder.binary_individual(
-                    precedence::MAX,
+                    precedence::COMPARISON,
                     precedence::COMPARISON,
                     precedence::AS,
-                    |a, b| format!("(({}) < {}) as i32", a, b),
+                    |a, b| format!("({} < {}) as i32", a, b),
                 );
             }
             I32LtU => {
@@ -1055,10 +1055,10 @@ pub fn build<W: Write>(
             }
             I64LtS => {
                 expr_builder.binary_individual(
-                    precedence::MAX,
+                    precedence::COMPARISON,
                     precedence::COMPARISON,
                     precedence::AS,
-                    |a, b| format!("(({}) < {}) as i32", a, b),
+                    |a, b| format!("({} < {}) as i32", a, b),
                 );
             }
             I64LtU => {
@@ -1126,7 +1126,7 @@ pub fn build<W: Write>(
                     precedence::COMPARISON,
                     precedence::COMPARISON,
                     precedence::AS,
-                    |a, b| format!("(({}) < {}) as i32", a, b),
+                    |a, b| format!("({} < {}) as i32", a, b),
                 );
             }
             F32Gt => {
@@ -1174,7 +1174,7 @@ pub fn build<W: Write>(
                     precedence::COMPARISON,
                     precedence::COMPARISON,
                     precedence::AS,
-                    |a, b| format!("(({}) < {}) as i32", a, b),
+                    |a, b| format!("({} < {}) as i32", a, b),
                 );
             }
             F64Gt => {
