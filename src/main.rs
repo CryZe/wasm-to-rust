@@ -8,30 +8,37 @@ use parity_wasm::deserialize_file;
 use parity_wasm::elements::{External, FunctionType, ImportCountType, Internal, NameSection,
                             Opcode, Section, Type, ValueType};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use structopt::StructOpt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
+use structopt::StructOpt;
 use unicode_xid::UnicodeXID;
 use unidecode::unidecode_char;
 
-mod precedence;
-mod expr_builder;
 mod code_builder;
+mod expr_builder;
+mod precedence;
 mod reorder_analysis;
 
 #[derive(StructOpt)]
 struct Opt {
-    #[structopt(short = "n", long = "use-name-section",
-                help = "Use the names in the name section for the internal function names")]
+    #[structopt(
+        short = "n",
+        long = "use-name-section",
+        help = "Use the names in the name section for the internal function names"
+    )]
     use_name_section: bool,
-    #[structopt(short = "c", long = "public-call-indirect",
-                help = "Make indirect calling available in the API")]
+    #[structopt(
+        short = "c",
+        long = "public-call-indirect",
+        help = "Make indirect calling available in the API"
+    )]
     public_call_indirect: bool,
     #[structopt(help = "Input file", parse(from_os_str))]
     input: PathBuf,
-    #[structopt(help = "Output file, stored next to wasm file if not specified",
-                parse(from_os_str))]
+    #[structopt(
+        help = "Output file, stored next to wasm file if not specified", parse(from_os_str)
+    )]
     output: Option<PathBuf>,
 }
 
@@ -222,8 +229,12 @@ fn main() {
         function.name = mangle_fn_name(&function.name);
     }
 
-    writeln!(writer,
-        "#![allow(unreachable_code, dead_code, unused_assignments, unused_mut, unused_variables, non_snake_case, non_upper_case_globals, unused_parens, unconditional_recursion)]
+    writeln!(
+        writer,
+        "#![allow(
+    unreachable_code, dead_code, unused_assignments, unused_mut, unused_variables, non_snake_case,
+    non_upper_case_globals, unused_parens, unconditional_recursion
+)]
 
 pub const PAGE_SIZE: usize = 64 << 10;
 
@@ -270,7 +281,6 @@ pub trait Imports {{
     if let Some(global_section) = module.global_section() {
         for entry in global_section.entries() {
             let ty = entry.global_type();
-            let name = format!("global{}", globals.len());
             let init_val = entry.init_expr().code();
             assert!(init_val.len() >= 1);
             let (value, init_code) = match init_val[0] {
@@ -280,8 +290,14 @@ pub trait Imports {{
                 Opcode::F64Const(c) => (c.to_string(), None),
                 _ => (String::from("Default::default()"), Some(init_val)),
             };
+            let is_mutable = ty.is_mutable() || init_code.is_some();
+            let name = if is_mutable {
+                format!("global{}", globals.len())
+            } else {
+                format!("GLOBAL{}", globals.len())
+            };
             globals.push(Global {
-                is_mutable: ty.is_mutable() || init_code.is_some(),
+                is_mutable,
                 is_pub: false,
                 name,
                 ty: to_rs_type(ty.content_type()),
@@ -366,13 +382,13 @@ pub mod consts {"#
 
         for global in &globals[imported_globals_count..] {
             if !global.is_mutable {
-                write!(writer, "    ").unwrap();
-                if global.is_pub {
-                    write!(writer, "pub ").unwrap();
+                write!(writer, "    pub").unwrap();
+                if !global.is_pub {
+                    write!(writer, "(super)").unwrap();
                 }
                 writeln!(
                     writer,
-                    "const {}: {} = {};",
+                    " const {}: {} = {};",
                     global.name, global.ty, global.value
                 ).unwrap();
             }
