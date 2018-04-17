@@ -177,7 +177,7 @@ pub fn build<W: Write>(
                                 expr_builder.push((precedence::PATH, dst_var));
                             } else {
                                 writeln!(writer, "{}// There should've been an expression value here, but this may be unreachable", indentation).unwrap();
-                                writeln!(writer, "{}unreachable!()", indentation).unwrap();
+                                writeln!(writer, "{}unreachable!();", indentation).unwrap();
                             }
                         }
                         writeln!(writer, "{}break;", indentation).unwrap();
@@ -193,7 +193,7 @@ pub fn build<W: Write>(
                                 expr_builder.push((precedence::PATH, dst_var));
                             } else {
                                 writeln!(writer, "{}// There should've been an expression value here, but this may be unreachable", indentation).unwrap();
-                                writeln!(writer, "{}unreachable!()", indentation).unwrap();
+                                writeln!(writer, "{}unreachable!();", indentation).unwrap();
                             }
                         }
                         if is_breakable {
@@ -208,7 +208,7 @@ pub fn build<W: Write>(
                                 writeln!(writer, "{}{}", indentation, expr).unwrap();
                             } else {
                                 writeln!(writer, "{}// There should've been an expression value here, but this may be unreachable", indentation).unwrap();
-                                writeln!(writer, "{}unreachable!()", indentation).unwrap();
+                                writeln!(writer, "{}unreachable!();", indentation).unwrap();
                             }
                         }
                     }
@@ -243,11 +243,7 @@ pub fn build<W: Write>(
                         }
                         writeln!(writer, "{}break 'label{};", indentation, label).unwrap();
                     }
-                    BlockKind::Loop { ref dst_var, label } => {
-                        if let &Some(ref dst_var) = dst_var {
-                            let (_, expr) = expr_builder.pop().unwrap();
-                            writeln!(writer, "{}{} = {};", indentation, dst_var, expr).unwrap();
-                        }
+                    BlockKind::Loop { label, .. } => {
                         writeln!(writer, "{}continue 'label{};", indentation, label).unwrap();
                     }
                 }
@@ -261,10 +257,11 @@ pub fn build<W: Write>(
                     .expect("Branch Index out of Bounds");
 
                 let evaluates_to_value = match *block {
-                    BlockKind::Block { ref dst_var, .. }
-                    | BlockKind::Loop { ref dst_var, .. }
-                    | BlockKind::If { ref dst_var, .. } => dst_var.is_some(),
+                    BlockKind::Block { ref dst_var, .. } | BlockKind::If { ref dst_var, .. } => {
+                        dst_var.is_some()
+                    }
                     BlockKind::Function { evaluates_to_value } => evaluates_to_value,
+                    BlockKind::Loop { .. } => false,
                 };
 
                 // TODO This evaluates cond and val out of order. So this relies
@@ -304,16 +301,7 @@ pub fn build<W: Write>(
                         }
                         writeln!(writer, "{}break 'label{};", indentation, label).unwrap();
                     }
-                    BlockKind::Loop { label, ref dst_var } => {
-                        if let Some(tmp_var) = tmp_var {
-                            writeln!(
-                                writer,
-                                "{}{} = {};",
-                                indentation,
-                                dst_var.as_ref().unwrap(),
-                                tmp_var,
-                            ).unwrap();
-                        }
+                    BlockKind::Loop { label, .. } => {
                         writeln!(writer, "{}continue 'label{};", indentation, label).unwrap();
                     }
                     BlockKind::Function { .. } => {

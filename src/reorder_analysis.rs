@@ -1,4 +1,7 @@
-use parity_wasm::elements::{BlockType, Opcode::{self, *}, Type, TypeSection};
+use parity_wasm::elements::{BlockType,
+                            Opcode::{self, *},
+                            Type,
+                            TypeSection};
 use {BlockKind, Function};
 
 pub fn can_local_be_reordered(
@@ -12,10 +15,11 @@ pub fn can_local_be_reordered(
     let mut stack_frames = blocks
         .iter()
         .map(|b| match *b {
-            BlockKind::Function { evaluates_to_value } => (-1, evaluates_to_value),
-            BlockKind::Block { ref dst_var, .. }
-            | BlockKind::If { ref dst_var, .. }
-            | BlockKind::Loop { ref dst_var, .. } => (-1, dst_var.is_some()),
+            BlockKind::Function { evaluates_to_value } => (-1, evaluates_to_value, true),
+            BlockKind::Block { ref dst_var, .. } | BlockKind::If { ref dst_var, .. } => {
+                (-1, dst_var.is_some(), true)
+            }
+            | BlockKind::Loop { ref dst_var, .. } => (-1, dst_var.is_some(), false),
         })
         .collect::<Vec<_>>();
 
@@ -29,7 +33,7 @@ pub fn can_local_be_reordered(
                 } else {
                     false
                 };
-                stack_frames.push((position_on_stack, evaluates_to_value));
+                stack_frames.push((position_on_stack, evaluates_to_value, true));
             }
             Loop(block_type) => {
                 let evaluates_to_value = if let BlockType::Value(_) = block_type {
@@ -37,7 +41,7 @@ pub fn can_local_be_reordered(
                 } else {
                     false
                 };
-                stack_frames.push((position_on_stack, evaluates_to_value));
+                stack_frames.push((position_on_stack, evaluates_to_value, false));
             }
             If(block_type) => {
                 position_on_stack -= 1;
@@ -49,17 +53,17 @@ pub fn can_local_be_reordered(
                 } else {
                     false
                 };
-                stack_frames.push((position_on_stack, evaluates_to_value));
+                stack_frames.push((position_on_stack, evaluates_to_value, true));
             }
             Else => {
-                let &(pos, _) = stack_frames.last().unwrap();
+                let &(pos, _, _) = stack_frames.last().unwrap();
                 position_on_stack = pos;
                 if position_on_stack < 0 {
                     return true;
                 }
             }
             End => {
-                let (pos, evaluates_to_value) = stack_frames.pop().unwrap();
+                let (pos, evaluates_to_value, _) = stack_frames.pop().unwrap();
                 position_on_stack = pos;
                 if position_on_stack < 0 {
                     return true;
@@ -70,10 +74,10 @@ pub fn can_local_be_reordered(
             }
             Br(relative_depth) => {
                 let last = stack_frames.len() - 1;
-                let &(_, evaluates_to_value) =
+                let &(_, evaluates_to_value, breaks_to_value) =
                     stack_frames.get(last - relative_depth as usize).unwrap();
 
-                if evaluates_to_value {
+                if evaluates_to_value && breaks_to_value {
                     position_on_stack -= 1;
                     if position_on_stack < 0 {
                         return true;
@@ -87,10 +91,10 @@ pub fn can_local_be_reordered(
                 }
 
                 let last = stack_frames.len() - 1;
-                let &(_, evaluates_to_value) =
+                let &(_, evaluates_to_value, breaks_to_value) =
                     stack_frames.get(last - relative_depth as usize).unwrap();
 
-                if evaluates_to_value {
+                if evaluates_to_value && breaks_to_value {
                     position_on_stack -= 1;
                     if position_on_stack < 0 {
                         return true;
