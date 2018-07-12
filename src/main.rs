@@ -5,8 +5,10 @@ extern crate unicode_xid;
 extern crate unidecode;
 
 use parity_wasm::deserialize_file;
-use parity_wasm::elements::{External, FunctionType, ImportCountType, Internal, NameSection,
-                            Opcode, Section, Type, ValueType};
+use parity_wasm::elements::{
+    External, FunctionType, ImportCountType, Internal, NameSection, Opcode, Section, Type,
+    ValueType,
+};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -55,8 +57,7 @@ pub struct Global<'a> {
     is_pub: bool,
     name: String,
     ty: &'static str,
-    value: String,
-    init_code: Option<&'a [Opcode]>,
+    const_expr: &'a [Opcode],
 }
 
 #[derive(Debug)]
@@ -269,8 +270,7 @@ pub trait Imports {{
                     is_pub: true, // Doesn't really apply
                     name,
                     ty: to_rs_type(ty.content_type()),
-                    value: String::new(), // Doesn't really apply
-                    init_code: None,
+                    const_expr: &[],
                 });
             }
         }
@@ -281,16 +281,9 @@ pub trait Imports {{
     if let Some(global_section) = module.global_section() {
         for entry in global_section.entries() {
             let ty = entry.global_type();
-            let init_val = entry.init_expr().code();
-            assert!(init_val.len() >= 1);
-            let (value, init_code) = match init_val[0] {
-                Opcode::I32Const(c) => (c.to_string(), None),
-                Opcode::I64Const(c) => (c.to_string(), None),
-                Opcode::F32Const(c) => (c.to_string(), None),
-                Opcode::F64Const(c) => (c.to_string(), None),
-                _ => (String::from("Default::default()"), Some(init_val)),
-            };
-            let is_mutable = ty.is_mutable() || init_code.is_some();
+            let const_expr = entry.init_expr().code();
+            let is_mutable =
+                ty.is_mutable() || is_const_expr_immutable_instead_of_const(const_expr);
             let name = if is_mutable {
                 format!("global{}", globals.len())
             } else {
@@ -301,8 +294,7 @@ pub trait Imports {{
                 is_pub: false,
                 name,
                 ty: to_rs_type(ty.content_type()),
-                value,
-                init_code,
+                const_expr,
             });
         }
     }
@@ -368,6 +360,15 @@ pub struct Context<M: Memory> {
         }
     }
 
+    let mut has_dynamic_element_section_offset = false;
+    if let Some(entry) = module.elements_section().and_then(|e| e.entries().get(0)) {
+        let const_expr = entry.offset().code();
+        if is_const_expr_immutable_instead_of_const(const_expr) {
+            writeln!(writer, "    element_section_offset: i32,").unwrap();
+            has_dynamic_element_section_offset = true;
+        }
+    }
+
     if globals[imported_globals_count..]
         .iter()
         .any(|g| !g.is_mutable)
@@ -386,11 +387,17 @@ pub mod consts {"#
                 if !global.is_pub {
                     write!(writer, "(super)").unwrap();
                 }
-                writeln!(
-                    writer,
-                    " const {}: {} = {};",
-                    global.name, global.ty, global.value
-                ).unwrap();
+                write!(writer, " const {}: {} = ", global.name, global.ty).unwrap();
+                write_const_expr(
+                    &mut writer,
+                    global.const_expr,
+                    &globals,
+                    imported_globals_count,
+                    "",
+                    "",
+                    "",
+                );
+                writeln!(writer, ";").unwrap();
             }
         }
     }
@@ -416,6 +423,95 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
         ).unwrap();
     }
 
+    writeln!(
+        writer,
+        "{}",
+        r#"        let mut instance = Self {
+            imports,
+            context: Context {
+                memory,"#
+    ).unwrap();
+
+    for global in &globals[imported_globals_count..] {
+        if global.is_mutable {
+            write!(writer, "                {}: ", global.name).unwrap();
+            if is_const_expr_immutable_instead_of_const(global.const_expr) {
+                write!(writer, "Default::default()").unwrap();
+            } else {
+                write_const_expr(
+                    &mut writer,
+                    global.const_expr,
+                    &globals,
+                    imported_globals_count,
+                    "consts::",
+                    "",
+                    "",
+                );
+            }
+            writeln!(writer, ",").unwrap();
+        }
+    }
+
+    if has_dynamic_element_section_offset {
+        writeln!(writer, "                element_section_offset: 0,").unwrap();
+    }
+
+    writeln!(
+        writer,
+        "{}",
+        r#"            },
+        };"#
+    ).unwrap();
+
+    for global in &globals[imported_globals_count..] {
+        if global.is_mutable && is_const_expr_immutable_instead_of_const(global.const_expr) {
+            write!(writer, "        instance.context.{} = ", global.name).unwrap();
+            write_const_expr(
+                &mut writer,
+                global.const_expr,
+                &globals,
+                imported_globals_count,
+                "consts::",
+                "instance.imports",
+                "&mut instance.context",
+            );
+            writeln!(writer, ";").unwrap();
+        }
+    }
+
+    let mut indirect_fns = BTreeMap::new();
+
+    if let Some(entry) = module.elements_section().and_then(|e| e.entries().get(0)) {
+        let const_expr = entry.offset().code();
+        let offset = if has_dynamic_element_section_offset {
+            write!(writer, "        instance.context.element_section_offset = ").unwrap();
+            write_const_expr(
+                &mut writer,
+                const_expr,
+                &globals,
+                imported_globals_count,
+                "consts::",
+                "instance.imports",
+                "&mut instance.context",
+            );
+            writeln!(writer, ";").unwrap();
+            0
+        } else {
+            assert!(const_expr.len() == 2);
+            match const_expr[0] {
+                Opcode::I32Const(c) => c,
+                _ => panic!("Unexpected Element Section Offset {:#?}", const_expr),
+            }
+        };
+        for (fn_ptr, &fn_index) in entry.members().iter().enumerate() {
+            let type_index = functions[fn_index as usize].ty_index;
+            indirect_fns
+                .entry(type_index)
+                .or_insert_with(Vec::new)
+                .push(((fn_ptr as i32 + offset) as u32, fn_index));
+        }
+    }
+
     if let Some(data_section) = module.data_section() {
         for entry in data_section.entries() {
             let offset = entry.offset().code();
@@ -424,13 +520,17 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
                 if entry.value().windows(2).all(|a| a[0] == a[1]) {
                     writeln!(
                         writer,
-                        r#"        memory.store_slice({}, &[{}; {}]);"#,
+                        r#"        instance.context.memory.store_slice({}, &[{}; {}]);"#,
                         c,
                         entry.value().first().cloned().unwrap_or_default(),
                         entry.value().len()
                     ).unwrap();
                 } else {
-                    write!(writer, r#"        memory.store_slice({}, b""#, c).unwrap();
+                    write!(
+                        writer,
+                        r#"        instance.context.memory.store_slice({}, b""#,
+                        c
+                    ).unwrap();
                     for &b in entry.value() {
                         match b {
                             b'\0' => write!(writer, r#"\0"#).unwrap(),
@@ -451,39 +551,6 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
                 panic!("Data Segment with init expression mismatch");
             }
         }
-    }
-
-    writeln!(
-        writer,
-        "{}",
-        r#"        let mut instance = Self {
-            imports,
-            context: Context {
-                memory,"#
-    ).unwrap();
-
-    for global in &globals[imported_globals_count..] {
-        if global.is_mutable {
-            writeln!(writer, "                {}: {},", global.name, global.value).unwrap();
-        }
-    }
-
-    writeln!(
-        writer,
-        "{}",
-        r#"            },
-        };"#
-    ).unwrap();
-
-    let has_globals_init_code = globals[imported_globals_count..]
-        .iter()
-        .any(|g| g.init_code.is_some());
-
-    if has_globals_init_code {
-        writeln!(
-            writer,
-            "        instance.context.init_global_values(&mut instance.imports);"
-        ).unwrap();
     }
 
     if let Some(start) = module.start_section() {
@@ -531,24 +598,6 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
         }
     }
 
-    let mut indirect_fns = BTreeMap::new();
-
-    if let Some(entry) = module.elements_section().and_then(|e| e.entries().get(0)) {
-        let init_val = entry.offset().code();
-        assert!(init_val.len() == 2);
-        let offset = match init_val[0] {
-            Opcode::I32Const(c) => c,
-            _ => panic!("Unexpected Element Section Offset"),
-        };
-        for (fn_ptr, &fn_index) in entry.members().iter().enumerate() {
-            let type_index = functions[fn_index as usize].ty_index;
-            indirect_fns
-                .entry(type_index)
-                .or_insert_with(Vec::new)
-                .push(((fn_ptr as i32 + offset) as u32, fn_index));
-        }
-    }
-
     if opt.public_call_indirect {
         for (&type_index, _) in &indirect_fns {
             let Type::Function(ref fn_type) = types.types()[type_index as usize];
@@ -586,34 +635,6 @@ impl<I: Imports<Memory = M>, M: Memory> Instance<I, M> {
 
 impl<M: Memory> Context<M> {"#
     ).unwrap();
-
-    if has_globals_init_code {
-        writeln!(
-            writer,
-            "    fn init_global_values<I: Imports<Memory = M>>(&mut self, imports: &mut I) {{"
-        ).unwrap();
-        for global in &globals[imported_globals_count..] {
-            if let Some(ref init_code) = global.init_code {
-                writeln!(writer, "        self.{} = {{", global.name).unwrap();
-                // TODO Handle Returns in here correctly
-                code_builder::build(
-                    &mut writer,
-                    0,
-                    true,
-                    import_count,
-                    imported_globals_count,
-                    &functions,
-                    &mut indirect_fns,
-                    &globals,
-                    types,
-                    init_code,
-                    3,
-                );
-                writeln!(writer, ";").unwrap();
-            }
-        }
-        writeln!(writer, "    }}").unwrap();
-    }
 
     for export in exports.entries() {
         if let &Internal::Function(fn_index) = export.internal() {
@@ -722,11 +743,15 @@ impl<M: Memory> Context<M> {"#
         if let Some(ret_ty) = fn_type.return_type() {
             write!(writer, " -> {}", to_rs_type(ret_ty)).unwrap();
         }
-        writeln!(
+        write!(
             writer,
             " {{
-        match ptr {{"
+        match ptr"
         ).unwrap();
+        if has_dynamic_element_section_offset {
+            write!(writer, " - self.element_section_offset").unwrap();
+        }
+        writeln!(writer, " {{").unwrap();
         for (fn_ptr, fn_index) in fns {
             let function = &functions[fn_index as usize];
             write!(writer, "            {} => ", fn_ptr).unwrap();
@@ -760,4 +785,60 @@ impl<M: Memory> Context<M> {"#
     }
 
     writeln!(writer, "}}").unwrap();
+}
+
+fn write_const_expr<W: Write>(
+    writer: &mut W,
+    opcodes: &[Opcode],
+    globals: &[Global],
+    imported_globals_count: usize,
+    consts_path: &str,
+    imports_path: &str,
+    context_path: &str,
+) {
+    assert!(
+        opcodes.len() == 2,
+        "Invalid Constant Expression {:#?}",
+        opcodes
+    );
+    match opcodes[0] {
+        Opcode::I32Const(c) => write!(writer, "{}", c).unwrap(),
+        Opcode::I64Const(c) => write!(writer, "{}", c).unwrap(),
+        Opcode::F32Const(c) => write!(writer, "{}", c).unwrap(),
+        Opcode::F64Const(c) => write!(writer, "{}", c).unwrap(),
+        Opcode::GetGlobal(i) => {
+            let global = &globals[i as usize];
+            let name = &global.name;
+            if (i as usize) < imported_globals_count {
+                write!(writer, "*{}.{}({})", imports_path, name, context_path).unwrap();
+            } else if global.is_mutable {
+                write_const_expr(
+                    writer,
+                    global.const_expr,
+                    globals,
+                    imported_globals_count,
+                    consts_path,
+                    imports_path,
+                    context_path,
+                );
+            } else {
+                write!(writer, "{}{}", consts_path, name).unwrap();
+            }
+        }
+        _ => panic!("Invalid Constant Expression {:#?}", opcodes),
+    }
+}
+
+fn is_const_expr_immutable_instead_of_const(opcodes: &[Opcode]) -> bool {
+    assert!(
+        opcodes.len() == 2,
+        "Invalid Constant Expression {:#?}",
+        opcodes
+    );
+    match opcodes[0] {
+        Opcode::I32Const(_) | Opcode::I64Const(_) | Opcode::F32Const(_) | Opcode::F64Const(_) => {
+            false
+        }
+        _ => true, // This could actually be fully const, but it's hard to tell this early
+    }
 }
